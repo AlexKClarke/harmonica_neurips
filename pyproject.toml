@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "harmonica-emg"
+version = "1.0.0"
+description = "HarmonICA: quasi-time-invariant ICA for motor-unit decomposition during dynamic contractions"
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.10"
+dependencies = [
+    "numpy",
+    "scipy",
+    "scikit-learn",
+    "pandas",
+    "torch",
+    "pydantic>=2",
+    "matplotlib",
+    "h5py",
+    "pyyaml",
+]
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+"*" = ["README.md", "LICENSE_*"]

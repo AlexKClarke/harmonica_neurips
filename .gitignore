@@ -1,0 +1,11 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+# benchmark data and run outputs stay out of the repository
+data/
+results/
+*.npz
+*.npy
