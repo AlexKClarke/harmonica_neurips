@@ -1,349 +1,12 @@
-"""Functions to evaluate motor unit properties"""
+"""Rate of agreement functions for spike comparsion."""
 
 import numpy as np
-from typing import Union, Optional, Tuple, List
-from scipy import signal
+from typing import List, Optional, Tuple, Union, Dict
+import scipy.signal as signal
 import itertools
-
-def firings_to_spikes(firings, ipts, matlab_index=False):
-    """
-    Convert firings to spikes
-    """
-    spikes = np.zeros_like(ipts)
-    for i, firing in enumerate(firings):
-        if matlab_index:
-            firing = firing - 1
-        spikes[i, firing.astype(int)] = 1
-
-    return spikes
-
-def _check_mu_format(data: np.ndarray) -> np.ndarray:
-    """Check data is 2D and return it.
-
-    Args:
-        data (np.ndarray): Input data array.
-
-    Returns:
-        np.ndarray: 2D data array.
-    """
-
-    if len(data.shape) == 1:
-        data = np.expand_dims(data, axis=-1)
-    return data
-
-
-def get_discharge_rate(
-        spike_train: np.ndarray,
-        timestamps: Union[list, np.ndarray]
-        ) -> np.ndarray:
-    """Compute the discharge rate of motor units.
-
-    Args:
-        spike_train (np.ndarray): Binary spike train matrix of shape (n, m),
-            where n is the number of time points and m is the number of motor
-            units.
-        timestamps (Union[list, np.ndarray]): Array of timestamps corresponding
-            to the spike train.
-
-    Returns:
-        np.ndarray: Array of discharge rates for each motor unit.
-    """
-
-    # Get number of motor units and initialise dr
-    spike_train = _check_mu_format(spike_train.astype(bool))
-    units = spike_train.shape[-1]
-    dr = np.zeros(units)
-
-    for unit in range(units):
-        # Compute the total number of firings
-        n_spikes = np.sum(spike_train[:, unit].astype(int))
-
-        if n_spikes == 0:
-            continue
-
-        # Get firing times
-        times_spikes = timestamps[spike_train[:, unit]]
-
-        # Get total active period
-        total_period = times_spikes[-1] - times_spikes[0]
-
-        if total_period == 0:
-            continue
-
-        # Calculate interspike interval (ISI)
-        isi = np.diff(times_spikes)
-
-        # Find silent periods (i.e. where the ISI is larger than the minimum
-        # motor unit discharge rate). This is 4 Hz according to "Negro F (2016)
-        # Multi-channel intramuscular and surface EMG decomposition by
-        # convolutive blind source separation."
-        silent_period = np.sum(isi[isi > 0.25])
-
-        # Calculate the actual active period of the motor unit
-        active_period = total_period - silent_period
-
-        # Return mean discharge rate
-        dr[unit] = n_spikes / active_period
-
-    return dr
-
-
-def get_number_of_spikes(spike_train: np.ndarray) -> np.ndarray:
-    """Function to compute the number of spikes.
-
-    Args:
-        spike_train (np.ndarray): Binary spike train matrix of shape (n, m),
-            where n is the number of time points and m is the number of motor
-            units.
-
-    Returns:
-        np.ndarray: number of spikes for each motor unit
-    """
-
-    # Compute the number of spikes
-    n_spikes = np.sum(spike_train.astype(int), axis=0)
-
-    return n_spikes
-
-
-def get_inst_discharge_rate(
-        spike_train: np.ndarray,
-        fs: Optional[int] = 2048
-        ) -> np.ndarray:
-    """Compute the instantaneous discharge rate of motor units.
-
-    Args:
-        spike_train (np.ndarray): Binary spike train matrix of shape (n, m),
-            where n is the number of time points and m is the number of motor
-            units.
-        fs (Optional[int], optional): Sampling frequency in Hz. Defaults to 2048.
-
-    Returns:
-        np.ndarray: Array of instantaneous discharge rates for each motor unit.
-    """
-
-    # Get number of motor units and initialise ints_DR
-    spike_train = _check_mu_format(spike_train.astype(bool))
-    units = spike_train.shape[-1]
-    inst_dr = np.zeros(spike_train.shape)
-
-    # Define hanning window
-    dur = 1  # (s) for the moving average
-    hann_win = np.hanning(np.round(dur * fs))
-
-    for unit in range(units):
-        # Convolve the hanning window and the binary spikes
-        inst_dr[:, unit] = np.convolve(
-            spike_train[:, unit], hann_win, mode='same'
-            ) * 2
-
-    return inst_dr
-
-
-def get_coefficient_of_variation(
-        spike_train: np.ndarray,
-        timestamps: Union[list, np.ndarray]
-        ) -> np.ndarray:
-    """
-    Calculate the coefficient of variation (CoV) for each motor unit in a spike
-    train.
-
-    Parameters:
-        spike_train (np.ndarray): Binary spike train matrix of shape (n, m),
-            where n is the number of time points and m is the number of motor
-            units.
-        timestamps (Union[list, np.ndarray]): Array of timestamps
-            corresponding to each time point in the spike train.
-
-    Returns:
-        np.ndarray: Array of CoV values for each motor unit, scaled by 100.
-
-    Notes:
-        - The CoV is calculated as the standard deviation of the interspike
-          intervals divided by the mean interspike interval.
-        - Interspike intervals greater than 0.25 s (or discharge rate less than
-          4 Hz) and intervals less than 0.02 s (or discharge rate greater than
-          50 Hz) are discarded, based on "Negro F (2016). Multi-channel
-          intramuscular and surface EMG decomposition by convolutive blind
-          source separation."
-    """
-    # Function implementation
-    spike_train = _check_mu_format(spike_train.astype(bool))
-    units = spike_train.shape[-1]
-    cov = np.zeros(units)
-    cov[:] = np.nan
-
-    for unit in range(units):
-        if not np.any(spike_train[:, unit]):
-            continue
-
-        times_spikes = timestamps[spike_train[:, unit]]
-        isi = np.diff(times_spikes)
-        isi = isi[isi < 0.25]
-        cov[unit] = np.std(isi) / np.mean(isi)
-
-    return cov * 100
-
-
-def get_pulse_to_noise_ratio(
-    spike_train: np.ndarray,
-    ips: np.ndarray,
-    ext_fact: int = 8
-    ) -> np.ndarray:
-    """Compute the pulse-to-noise ratio (PNR) for each motor unit.
-
-    Args:
-    spike_train (np.ndarray): Binary spike train matrix of shape (n, m),
-        where n is the number of time points and m is the number of motor
-        units.
-    ips (np.ndarray): Innervated pulse trains (IPTs) with shape (n, m),
-        where n is the number of time points and m is the number of motor
-        units.
-    ext_fact (int, optional): Extension factor to discard initial spikes.
-        Defaults to 8.
-
-    Returns:
-    np.ndarray: Array of PNR values for each motor unit.
-
-    Notes:
-    - The PNR is calculated as 20 * log10(spikes_mean / baseline_mean),
-      where spikes_mean is the mean of the IPTs corresponding to the spikes
-      and baseline_mean is the mean of the IPTs corresponding to the
-      baseline.
-    - The baseline is defined as the IPTs with amplitude lower than the
-      lowest spike.
-    - IPTs greater than the extension factor are considered for both spikes
-      and baseline.
-    """
-
-    # Get number of motor units and initialise PNR
-    spike_train = _check_mu_format(spike_train.astype(bool))
-    ips = _check_mu_format(ips)
-    units = spike_train.shape[-1]
-    pnr = np.zeros(units)
-    pnr[:] = np.nan
-
-    # Square IPTs
-    ipts2 = ips ** 2
-
-    for unit in range(units):
-        # Get the spikes and baseline indexes, discarding the extension factor
-        spikes_idx = np.nonzero(spike_train[:, unit])[0]
-        spikes_idx = spikes_idx[np.greater_equal(spikes_idx, ext_fact + 1)]
-
-        if not np.any(spikes_idx):
-            continue
-
-        spikes = ipts2[spikes_idx, unit]
-        min_spikes_amp = np.amin(spikes)
-
-        # Get baseline peaks with amplitude lower than the lowest spike
-        baseline_peaks_idx, _ = signal.find_peaks(
-            ipts2[:, unit], height=(0, min_spikes_amp)
-            )
-        if not np.any(baseline_peaks_idx):
-            baseline_peaks_idx = np.nonzero(
-                np.logical_not(spike_train[:, unit].astype(bool))
-                )[0]
-        baseline_peaks_idx = baseline_peaks_idx[
-            np.greater_equal(baseline_peaks_idx, ext_fact + 1)
-            ]
-        baseline = ipts2[baseline_peaks_idx, unit]
-
-        if len(spikes) == 0:
-            continue
-
-        # Compute spikes and baseline mean values
-        spikes_mean = np.mean(spikes)
-        baseline_mean = np.mean(baseline)
-
-        # Compute PNR
-        pnr[unit] = 20 * np.log10(spikes_mean / baseline_mean)
-
-    return pnr
-
-
-def get_silhouette_measure(
-    spike_train: np.ndarray,
-    ipts: np.ndarray,
-    ext_fact: int = 8
-) -> np.ndarray:
-    """Compute the silhouette measure for each motor unit.
-
-    Args:
-        spike_train (np.ndarray): Binary spike train matrix of shape (n, m),
-            where n is the number of time points and m is the number of motor
-            units.
-        ips (np.ndarray): Innervated pulse trains (IPTs) with shape (n, m),
-            where n is the number of time points and m is the number of motor
-            units.
-        ext_fact (int, optional): Extension factor to discard initial spikes.
-            Defaults to 8.
-
-    Returns:
-        np.ndarray: Array of silhouette measures for each motor unit.
-
-    Notes:
-        - The silhouette measure is a measure of how well-separated the spikes
-          and baseline are in terms of their IPTs.
-        - The silhouette measure is calculated as
-          (dist_sum_baseline - dist_sum_spikes) / max_dist, where
-          dist_sum_baseline is the sum of squared distances between each
-          baseline IPT and the mean baseline IPT, dist_sum_spikes is the sum
-          of squared distances between each spike IPT and the mean spike IPT,
-          and max_dist is the maximum of dist_sum_baseline and dist_sum_spikes.
-    """
-
-    # Get number of motor units and initialise sil
-    spike_train = _check_mu_format(spike_train.astype(bool))
-    ipts = _check_mu_format(ipts)
-    units = spike_train.shape[-1]
-    sil = np.zeros(units)
-    sil[:] = np.nan
-
-    # Square IPTs
-    ipts2 = ipts ** 2
-
-    for unit in range(units):
-        # Get the spikes and baseline indexes, discarding the extension factor
-        spikes_idx = np.nonzero(spike_train[:, unit])[0]
-        spikes_idx = spikes_idx[np.greater_equal(spikes_idx, ext_fact + 1)]
-
-        if not np.any(spikes_idx):
-            continue
-
-        spikes_amp = ipts2[spikes_idx, unit]
-        min_spikes_amp = np.amin(spikes_amp)
-
-        # Get baseline peaks with amplitude lower than the lowest spike
-        baseline_peaks_idx, _ = signal.find_peaks(
-            ipts2[:, unit], height=(0, min_spikes_amp)
-            )
-        if not np.any(baseline_peaks_idx):
-            baseline_peaks_idx = np.nonzero(
-                np.logical_not(spike_train[:, unit].astype(bool))
-                )[0]
-        baseline_peaks_idx = baseline_peaks_idx[
-            np.greater_equal(baseline_peaks_idx, ext_fact + 1)
-            ]
-        baseline_amp = ipts2[baseline_peaks_idx, unit]
-
-        # Compute spikes and baseline mean values
-        spikes_mean = np.mean(spikes_amp)
-        baseline_mean = np.mean(baseline_amp)
-
-        # Compute distances
-        dist_sum_spikes = np.sum(np.power((spikes_amp - spikes_mean), 2))
-        dist_sum_baseline = np.sum(np.power((spikes_amp - baseline_mean), 2))
-
-        # Compute sil
-        max_dist = np.amax([dist_sum_spikes, dist_sum_baseline])
-        if max_dist == 0:
-            sil[unit] = 0
-        else:
-            sil[unit] = (dist_sum_baseline - dist_sum_spikes) / max_dist
-
-    return sil
+import torch
+from loguru import logger
+from .metrics import get_coefficient_of_variation
 
 def rate_of_agreement_paired(
     spike_trains_ref: np.ndarray,
@@ -351,7 +14,7 @@ def rate_of_agreement_paired(
     fs: Optional[int] = 2048,
     tol_spike_ms: Optional[int] = 1,
     tol_train_ms: Optional[int] = 40
-) -> Tuple[np.ndarray, List[Tuple[int, int]], np.ndarray]:
+    ) -> Tuple[np.ndarray, List[Tuple[int, int]], np.ndarray]:
     """Compute the rate of agreement between two sets of paired spike trains.
 
     Args:
@@ -397,7 +60,7 @@ def rate_of_agreement_paired(
 
     #  If there are no spikes return empty RoA
     if (not np.any(spike_trains_ref)) | (not np.any(spike_trains_test)):
-        pair_idx = np.arange(n_units)
+        pair_idx = [(unit, unit) for unit in range(n_units)]
         pair_lag = np.zeros((n_units))
         roa = np.zeros((n_units))
         return roa, pair_idx, pair_lag
@@ -474,7 +137,7 @@ def rate_of_agreement(
     fs: Optional[int] = 2048,
     tol_spike_ms: Optional[int] = 1,
     tol_train_ms: Optional[int] = 40,
-) -> Tuple[np.ndarray, List[Tuple[int, int]], np.ndarray]:
+    ) -> Tuple[np.ndarray, List[Tuple[int, int]], np.ndarray]:
     """Compute the rate of agreement between two sets of spike trains.
 
     Args:
@@ -515,7 +178,7 @@ def rate_of_agreement(
         if len( spike_trains_test.shape ) == 1:
             spike_trains_test = np.expand_dims(spike_trains_test, axis=-1)
     
-    if spike_trains_ref.shape[0] != spike_trains_test.shape[0]:
+    if spike_trains_ref is not None and spike_trains_ref.shape[0] != spike_trains_test.shape[0]:
         raise ValueError(f'Time dimensionality mismatch between ref {spike_trains_ref.shape} and test {spike_trains_test.shape}.')
 
     # Put tolerances into samples
@@ -527,7 +190,7 @@ def rate_of_agreement(
 
     #  If no spike trains to test are provided, return empty RoA
     if not np.any(spike_trains_test):
-        pair_idx = np.arange(n_units_test)
+        pair_idx = [(unit, unit) for unit in range(n_units_test)]
         pair_lag = np.zeros((n_units_test))
         roa = np.zeros((n_units_test))
         return roa, pair_idx, pair_lag
@@ -620,7 +283,6 @@ def rate_of_agreement(
         firings_1 = np.nonzero(spike_trains_test[:, pair[1]])[0] + pair_lag[i]
 
         # Initialise variables
-        # len_firings_1 = len(firings_1)
         firings_common = 0
         firings_0_only = 0
         firings_1_only = 0
@@ -647,3 +309,139 @@ def rate_of_agreement(
     pair_lag_sorted = [int(pair_lag[i]) for i in pairs_sort_idx]
 
     return roa_sorted, pair_idx_sorted, pair_lag_sorted
+
+
+def pair_ground_truth(
+    spikes_gt: np.ndarray,
+    spikes_calib: np.ndarray,
+    fs: int,
+    tol_spike_ms: float = 2.0,
+) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
+    """Match ground truth spikes to calibration window
+
+    Args:
+        spikes_gt (np.ndarray): Ground-truth binary spike train for the full
+            recording, with shape (samples, n_gt).
+        spikes_calib (np.ndarray): Calibration binary spike train (e.g.
+            CBSSResult.spikes), with shape (samples_calib, n_dec).
+        fs (int): Sampling frequency in Hz.
+        tol_spike_ms (float, optional): Spike-coincidence tolerance in ms,
+            forwarded to rate_of_agreement. Defaults to 2.0.
+
+    Returns:
+        Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
+            - gt_full_bin with matched spikes_gt to spikes_calib's units, shape
+            (samples, n_matched) (n_matched <= n_dec if rate_of_agreement's
+            leaves some decomposed units unmatched))
+            - roa_calib: per-matched-unit rate of agreement over the calibration
+             window with shape (, n_matched)
+        (None, None) if spikes_calib has no units or none is matched.
+    """
+    if spikes_calib.shape[1] == 0:
+        return None, None
+
+    roa_calib, pair_calib, _ = rate_of_agreement(
+        spikes_gt[: spikes_calib.shape[0]], spikes_calib, fs=fs, tol_spike_ms=tol_spike_ms,
+    )
+    if not pair_calib:
+        return None, None
+
+    gt_idx = np.array(pair_calib)[:, 0]
+    return spikes_gt[:, gt_idx], roa_calib
+
+
+def spikes_dict_to_binary(
+    spikes_dict: Dict[int, np.ndarray],
+    n_samples: int,
+    *,
+    device: torch.device | str,
+) -> torch.Tensor:
+    """Convert {unit: spike_indices} to a [T, n_units] int32 binary matrix."""
+    spike_trains = torch.zeros(n_samples, len(spikes_dict), dtype=torch.int32, device=device)
+    for unit, idx in spikes_dict.items():
+        idx_t = torch.as_tensor(idx, dtype=torch.long, device=device)
+        idx_t = idx_t[(idx_t >= 0) & (idx_t < n_samples)]
+        if idx_t.numel() > 0:
+            spike_trains[idx_t, int(unit)] = 1
+    return spike_trains
+
+
+
+def remove_duplicates(
+    result: Dict,
+    fs: float,
+    *,
+    roa_th: float = 0.3,
+    tol_train_ms: float = 40.0,
+    tol_spike_ms: float = 1.0,
+    dtype: torch.dtype = torch.float32,
+    device: str = "cpu",
+    verbose: bool = False,
+) -> Dict:
+    """Remove duplicate motor units (by RoA), keeping the unit with lower CoV-ISI.
+
+    Operates on result['sources'] [T, n_mu] and result['spikes_dict'].
+    Per-unit arrays preserved: sil, cov_isi, spikes_centr, base_centr,
+    sep_vectors [dim, n_mu].
+    """
+    sources = result.get("sources")
+    spikes_dict = result.get("spikes_dict", {})
+    if sources is None or len(spikes_dict) < 2:
+        return result
+
+    _device = torch.device(device)
+    sources_t = torch.as_tensor(sources, dtype=dtype, device=_device)
+    n_samples = sources_t.shape[0]
+
+    spike_trains = spikes_dict_to_binary(spikes_dict, n_samples, device=_device)
+    n_units = spike_trains.shape[1]
+    if n_units < 2:
+        return result
+
+    timestamps = torch.arange(n_samples, dtype=dtype, device=_device) / fs
+    cov_isi = get_coefficient_of_variation(spike_trains, timestamps, None)
+    cov_isi_np = torch.where(
+        torch.isnan(cov_isi), torch.full_like(cov_isi, torch.inf), cov_isi
+    ).cpu().numpy()
+
+    roa_vals, pairs, _ = rate_of_agreement(
+        None, spike_trains.cpu().numpy(), fs=int(fs),
+        tol_spike_ms=tol_spike_ms, tol_train_ms=tol_train_ms,
+    )
+    sort_order = np.argsort(roa_vals)[::-1]
+    keep = np.ones(n_units, dtype=bool)
+    for sort_idx in sort_order:
+        score = float(roa_vals[sort_idx])
+        if score <= roa_th:
+            break
+        i, j = pairs[sort_idx]
+        if not (keep[i] and keep[j]):
+            continue
+        if cov_isi_np[i] <= cov_isi_np[j]:
+            keep[j] = False
+            removed, kept = j, i
+        else:
+            keep[i] = False
+            removed, kept = i, j
+        if verbose:
+            logger.debug(f"Removed duplicate unit {removed} (RoA={score:.3f}, kept unit {kept})")
+
+    keep_idx = np.where(keep)[0]
+    if len(keep_idx) == n_units:
+        return result
+
+    result["sources"] = sources_t[:, keep_idx].cpu().numpy()
+    result["spikes_dict"] = {
+        new_id: spikes_dict[int(old_id)] for new_id, old_id in enumerate(keep_idx)
+    }
+    for key in ("sil", "cov_isi", "spikes_centr", "base_centr"):
+        value = result.get(key)
+        if value is not None and len(np.asarray(value)) == n_units:
+            result[key] = np.asarray(value)[keep_idx]
+    sep_vectors = result.get("sep_vectors")
+    if sep_vectors is not None:
+        sep_vectors = np.asarray(sep_vectors)
+        if sep_vectors.ndim == 2 and sep_vectors.shape[1] == n_units:
+            result["sep_vectors"] = sep_vectors[:, keep_idx]
+
+    return result

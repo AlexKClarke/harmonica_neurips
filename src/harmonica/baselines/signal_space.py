@@ -140,13 +140,7 @@ def run_signal_space(
     # ---------- Build persistent engine State -----------------------------
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     config = SurfaceConfig(sampling_frequency=float(FS))
-    # Disable the engine's gates — we keep peel-off but bypass SIL gating so we
-    # always emit spikes for every filter we warm-start.
-    config.acceptance_silhouette = 0.0
-    config.min_sil_for_compensation = 0.0
     config.min_peaks_in_source = 1
-    config.verbose_mode = False
-    config.log_every_n_steps = 0
     if config_overrides:
         for k, v in config_overrides.items():
             setattr(config, k, v)

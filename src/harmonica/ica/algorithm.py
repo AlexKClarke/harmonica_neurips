@@ -1,4 +1,4 @@
-"""FastICA decomposition loop — the project's ICA entry point.
+"""FastICA decomposition loop — the package's ICA entry point.
 
 Exposes:
 
@@ -6,14 +6,11 @@ Exposes:
 - :func:`peel_off`                — subtract a source from the signal via STA
 - :func:`run_ica_loop`            — the main fixed-point ICA loop
 
-``run_ica_loop`` iterates: initialise -> fixed-point optimise -> cluster spikes
--> (optionally) CoV-ISI refine -> (optionally) peel off, then post-processes
-the collection with :func:`remove_duplicates` and :func:`remove_bad_sources`.
-
-Seeds are baked in at defaults matching the sanity-check suite:
-
-- ``seed=1909`` for ICA determinism
-- ``sil_th=0.9`` (sanity suite overrides to ``0.8``)
+``run_ica_loop`` iterates: random initialisation -> fixed-point optimise ->
+cluster spikes -> (optionally) CoV-ISI refine -> (optionally) peel off, then
+post-processes the collection with :func:`remove_duplicates` and
+:func:`remove_bad_sources`. The defaults are ``seed=1909`` and ``sil_th=0.9``;
+the callers in this package pass ``sil_th`` explicitly.
 """
 from __future__ import annotations
 
@@ -126,7 +123,6 @@ def run_ica_loop(
     opt_max_iter: int = 100,
     opt_tol: float = 1e-4,
     opt_function_exp: float = 3,
-    source_deflation: str = "gram-schmidt",
     cluster_method: str = "kmeans",
     refinement_loop: bool = True,
     peel_off: bool = True,
@@ -137,15 +133,12 @@ def run_ica_loop(
     match_max_shift: float = 0.1,
     match_tol: float = 0.001,
     seed: int = 1909,
-    initialization: str = "random",
-    init_vectors: np.ndarray | None = None,
-    adaptive_exponent: bool = False,
-    constrained_mu: float = 0.0,
 ) -> tuple[np.ndarray, dict[int, np.ndarray], np.ndarray, np.ndarray]:
     """FastICA decomposition loop with CoV-ISI refinement and peel-off.
 
-    Extracted from the earlier ``basic_cBSS.decompose()`` so it can be
-    reused with different feature-extraction frontends.
+    Each iteration draws a random initial vector, runs the fixed-point
+    update with Gram-Schmidt deflation against the filters found so far,
+    and detects the source's spikes.
 
     Args:
         white_sig: Whitened signal, ``(n_features, n_samples)``.
@@ -154,7 +147,6 @@ def run_ica_loop(
         opt_max_iter: Maximum iterations per fixed-point optimisation.
         opt_tol: Convergence tolerance on ``|w . w_prev - 1|``.
         opt_function_exp: Contrast-function exponent (smooth ``|x|^a``).
-        source_deflation: ``'gram-schmidt'`` or ``'projection_deflation'``.
         cluster_method: Spike clustering method. Only ``'kmeans'``.
         refinement_loop: Whether to run the CoV-ISI refinement after each
             source.
@@ -169,15 +161,7 @@ def run_ica_loop(
         match_max_shift: Max shift for duplicate xcorr, in seconds.
         match_tol: Spike-matching tolerance for duplicate removal, in
             seconds.
-        seed: RNG seed.
-        initialization: ``'random'`` or ``'activity_idx'``.
-        init_vectors: Optional ``(n_init, n_features)`` array of seed
-            vectors used for the first ``n_init`` iterations.
-        adaptive_exponent: If True, when the default exponent misses
-            ``sil_th`` the loop retries with exponents ``[2, 4, 5]`` and
-            keeps the best SIL (Grison et al. 2025).
-        constrained_mu: Lagrange multiplier for constrained FastICA
-            (Lu & Bhatt 2011). Only active when ``init_vectors`` is given.
+        seed: RNG seed (``numpy.random.seed``) for the initial vectors.
 
     Returns:
         ``(sources, spikes, sil, mu_filters)``:
@@ -207,23 +191,15 @@ def run_ica_loop(
 
         return g, gp
 
-    fallback_exponents = [2, 4, 5] if adaptive_exponent else []
-
     sources = np.zeros((n_iter, n_samples))
     spikes: dict[int, np.ndarray] = {i: np.array([]) for i in range(n_iter)}
     sil = np.zeros(n_iter)
     mu_filters = np.zeros((n_features, n_iter))
 
-    act_idx_history = np.array([]) if initialization == "activity_idx" else None
     white_sig = white_sig.copy()
 
-    n_init_vecs = 0
-    if init_vectors is not None:
-        init_vectors = np.atleast_2d(init_vectors)
-        n_init_vecs = init_vectors.shape[0]
-
     def _run_fixed_point(
-        w_init: np.ndarray, a: float, w_ref_vec: np.ndarray | None = None
+        w_init: np.ndarray, a: float
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray, float]:
         """One fixed-point ICA run at exponent ``a``.
 
@@ -238,16 +214,7 @@ def run_ica_loop(
             wTX = w.T @ white_sig
             A = np.mean(gp_fp(wTX))
             w = np.mean(white_sig * g_fp(wTX), axis=1) - A * w
-
-            if w_ref_vec is not None:
-                anneal = max(0.0, 1.0 - k / (opt_max_iter * 0.5))
-                mu_c = constrained_mu * anneal
-                w = w + mu_c * (w_ref_vec - np.dot(w, w_ref_vec) * w)
-
-            if source_deflation == "projection_deflation":
-                w = w - (mu_filters @ mu_filters.T) @ w
-            elif source_deflation == "gram-schmidt":
-                w = gram_schmidt(w, mu_filters)
+            w = gram_schmidt(w, mu_filters)
 
             w = w / np.linalg.norm(w)
             delta[k + 1] = abs(np.dot(w, w_last) - 1)
@@ -259,39 +226,12 @@ def run_ica_loop(
 
     for i in range(n_iter):
         # --- initialise w ---
-        if i < n_init_vecs:
-            w_init = init_vectors[i].copy()
-            w_init = w_init / np.linalg.norm(w_init)
-        elif initialization == "random":
-            w_init = np.random.randn(n_features)
-        elif initialization == "activity_idx":
-            col_norms = np.linalg.norm(white_sig, axis=0)
-            col_norms[act_idx_history.astype(int)] = 0
-            best_idx = int(np.argmax(col_norms))
-            w_init = white_sig[:, best_idx]
-            act_idx_history = np.append(act_idx_history, best_idx)
-        else:
-            raise ValueError(f"Unknown initialization: {initialization!r}")
+        w_init = np.random.randn(n_features)
 
-        w_ref = (
-            w_init.copy() / np.linalg.norm(w_init)
-            if (constrained_mu > 0 and i < n_init_vecs)
-            else None
-        )
-
-        # --- fixed-point at default exponent, with optional fallback ---
+        # --- fixed-point optimisation ---
         w, best_src, best_sp, best_sil_val = _run_fixed_point(
-            w_init, opt_function_exp, w_ref
+            w_init, opt_function_exp
         )
-        if adaptive_exponent and best_sil_val < sil_th:
-            for a_try in fallback_exponents:
-                w_try, src_try, sp_try, sil_try = _run_fixed_point(
-                    w_init, a_try, w_ref
-                )
-                if sil_try > best_sil_val:
-                    w, best_src, best_sp, best_sil_val = (
-                        w_try, src_try, sp_try, sil_try
-                    )
 
         sources[i, :] = best_src
         spikes[i] = best_sp

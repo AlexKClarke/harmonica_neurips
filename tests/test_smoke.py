@@ -1,5 +1,6 @@
 """Smoke tests: the package imports, the detector is sign-preserving, and
-HarmonICA runs end to end on a small synthetic convolutive mixture.
+HarmonICA and the v1.0.0 Adapt baseline run end to end on a small synthetic
+convolutive mixture.
 
 ``test_benchmark_recording`` additionally runs the paper configuration on one
 benchmark recording when ``HARMONICA_DATA`` points at ``benchmark_v2/``.
@@ -76,6 +77,20 @@ def test_power_law_is_sign_preserving():
 def test_harmonica_synthetic_mixture():
     emg, fs, gt = _synthetic_mixture()
     spikes = run_harmonica(emg, fs, R=4, d_eff=64, epochs=30, sep_only_warmup=10)
+    assert isinstance(spikes, dict) and spikes
+    best = _best_f1(spikes, gt, fs)
+    assert sum(f >= 0.9 for f in best.values()) >= 2, best
+
+
+def test_adapt_v1_synthetic_mixture():
+    """The v1.0.0 Adapt engine runs from the vendored copy and finds the units."""
+    pytest.importorskip("optuna", reason="needs the [adapt] extra")
+    from harmonica.baselines import run_adapt_v1
+    import adapt_decomp
+    vendored = Path(harmonica.__file__).parent / "baselines" / "vendored_adapt_decomp_v1"
+    assert Path(adapt_decomp.__file__).resolve().is_relative_to(vendored.resolve())
+    emg, fs, gt = _synthetic_mixture()
+    spikes = run_adapt_v1(emg, fs, calib_s=2.0, ext_fact=4, d_eff=48, device="cpu")
     assert isinstance(spikes, dict) and spikes
     best = _best_f1(spikes, gt, fs)
     assert sum(f >= 0.9 for f in best.values()) >= 2, best

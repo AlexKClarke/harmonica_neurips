@@ -28,7 +28,7 @@ For each accepted MU ``j``, store:
    d. Update centroids: ``Tᵢⱼ ← (w₁Tᵢⱼ + w₂T'ᵢⱼ)/(w₁+w₂)`` with
       ``w₁ = 5``, ``w₂ = |Ψⱼ|``.
 
-Self-contained — imports only from ``evaluate`` and ``ica``.
+Self-contained — imports only from ``ica``.
 """
 from __future__ import annotations
 
@@ -38,7 +38,6 @@ from sklearn.cluster import KMeans
 from sklearn.decomposition import PCA
 
 from ..ica.algorithm import run_ica_loop
-from ..ica.detect import est_spike_times
 from ..ica.utils import extension
 from ..ica.whitening import whitening as _whiten
 
@@ -84,10 +83,9 @@ def run_chen(
     centroid_w1: float = 5.0,
     min_dist_ms: float = 10.0,
     cov_reg: float = 1e-3,
-    gate_sil: float | None = None,
     verbose: bool = False,
 ) -> dict[int, np.ndarray]:
-    """Chen 2020 adaptive CKC — calibration (our ICA) → online adaptation.
+    """Chen 2020 adaptive CKC — FastICA calibration → online adaptation.
 
     Args:
         emg: ``(n_channels, n_samples)`` channels-first EMG.
@@ -120,7 +118,7 @@ def run_chen(
     if T_calib >= T:
         raise ValueError(f"calib_s={calib_s}s exceeds signal {T/FS:.2f}s")
 
-    # ---- Calibration (classical CKC via our ICA stack) --------------
+    # ---- Calibration (classical CKC via the package's FastICA) -------
     emg_calib = emg[:, :T_calib]
     z_ext_calib_full = extension(emg_calib, ext_fact)            # (D_full, T_calib)
     D_full = z_ext_calib_full.shape[0]
@@ -197,10 +195,9 @@ def run_chen(
         z_pca_win = pca.transform(z_ext_win.T).T                 # (d, batch_T)
 
         # Eq. (5): C_yy ← α·C_yy + (1-α)·C_Δ  (EWMA; see cov_forgetting
-        # doc). The paper writes this as a literal sum which would let
-        # ``C_yy`` grow without bound and shrink the filter output
-        # amplitude below the calibration centroid — observed in our
-        # sanity test as F1≈0.27 (vs ~0.6 here).
+        # doc). The paper writes this as a literal sum, which lets
+        # ``C_yy`` grow without bound and shrinks the filter output
+        # amplitude below the calibration centroid.
         bt = z_pca_win.shape[1]
         cov_win = z_pca_win @ z_pca_win.T / bt
         running_cov = cov_forgetting * running_cov + (1.0 - cov_forgetting) * cov_win
@@ -228,18 +225,6 @@ def run_chen(
 
             if len(spike_peaks) == 0:
                 continue
-
-            # Opt-in, off by default (gated adaptation): if this MU's window source is already a
-            # clean spike train, freeze it — report spikes but skip the c_sy/centroid
-            # updates below. The additive Eq. (6) update integrates its own imperfect
-            # detections with no restoring force, so on stationary data it drifts good
-            # filters off their MU. Gating on quality recovers the frozen benefit while
-            # still adapting MUs that genuinely degrade.
-            if gate_sil is not None:
-                _, _sil_j = est_spike_times(s_j, FS)
-                if _sil_j >= gate_sil:
-                    all_spikes[j].extend((spike_peaks + s0).tolist())
-                    continue
 
             # Eq. (6): c_sy ← c_sy + ℓ · mean z̃ at new spikes
             c_sy[j] = c_sy[j] + learning_rate * (

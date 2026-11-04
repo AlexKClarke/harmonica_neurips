@@ -1,0 +1,62 @@
+{
+  "calib_s": 1.5,
+  "ext_fact": 8,
+  "d_eff": 128,
+  "sil_th": 0.8,
+  "ica_seed": 1909,
+  "grid": 320,
+  "approach": "sv",
+  "pool": "cov",
+  "optimiser": "optimize_adapt_decomp_pooled_memory",
+  "objective": "sv_loss",
+  "selection_rule": "min sv_loss (study.best_trial)",
+  "wh_learning_rate": 0.0051705783039383175,
+  "sv_learning_rate": 0.0021032248879856055,
+  "centroid_momentum": 0.9,
+  "base_config": "default_neuromotion.yaml",
+  "param_space": {
+    "wh_learning_rate": [
+      "log_float",
+      0.0001,
+      0.05
+    ],
+    "sv_learning_rate": [
+      "log_float",
+      0.0001,
+      0.1
+    ],
+    "centroid_momentum": [
+      "categorical",
+      [
+        0.1,
+        0.2,
+        0.3,
+        0.4,
+        0.5,
+        0.6,
+        0.7,
+        0.8,
+        0.9
+      ]
+    ]
+  },
+  "sampler": "TPESampler(n_startup_trials=15) [v1 default]",
+  "seed": 1909,
+  "n_trials": 100,
+  "roa_th": null,
+  "pool_sil_th": null,
+  "pool_cov_th": 0.3,
+  "roa_tol_ms": 2.0,
+  "library": "adapt_decomp",
+  "library_version": "1.0.0",
+  "trial_number": 82,
+  "pooled_wh_loss": 156.96320229768753,
+  "pooled_sv_loss": 1266.4297771453857,
+  "pooled_total_loss": 1423.3929777145386,
+  "roa_mean_pooled": 52.805817808092705,
+  "n_front": null,
+  "n_pool": 40,
+  "n_units": 225,
+  "n_units_paired": 225,
+  "skipped": {}
+}

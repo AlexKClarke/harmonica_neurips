@@ -1,13 +1,10 @@
-"""
-HarmonICA - EMG signal decomposition package
-"""
+"""HarmonICA engine: compensator networks, joint training step, timestamping."""
 
-from .configs import Config, IntramuscularConfig, SurfaceConfig
+from .configs import Config, SurfaceConfig
 from .decomposition import DecompositionModule
 
 __all__ = [
     "Config",
-    "IntramuscularConfig",
     "SurfaceConfig",
     "DecompositionModule",
-] 
+]

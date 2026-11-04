@@ -1,19 +1,10 @@
-"""Identifiable VAE (iVAE) — nonlinear-ICA baseline.
+"""Identifiable VAE (iVAE), an identifiable nonlinear-ICA baseline.
 
-After Khemakhem et al., AISTATS 2020. ``est_spike_times``,
-``remove_duplicates`` and ``remove_bad_sources`` come from
-``harmonica.ica`` so the detection / cleanup primitives match the
-rest of the paper's code path.
-
-iVAE is the second of the two canonical *identifiable* nonlinear-ICA
-methods. Conditioning the latent prior ``p(z|u)`` on an observed auxiliary
-variable ``u`` (here the joint angle) makes the recovered sources
-identifiable up to permutation and component-wise transform. The encoder
-``q(z|x,u)`` plays the role of the demixing function; each latent channel
-is spike-detected after training.
-
-Nothing here is on the main refinement path — it backs the
-nonlinear-ICA comparison in the supplementary material.
+After Khemakhem et al., AISTATS 2020. Conditioning the latent prior
+``p(z|u)`` on an observed auxiliary variable ``u`` (here the joint angle)
+makes the latent sources identifiable up to permutation and component-wise
+transform. The encoder mean ``q(z|x,u)`` plays the role of the demixing
+function. Used by :func:`harmonica.baselines.run_ivae`.
 """
 from __future__ import annotations
 
@@ -22,9 +13,6 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader, TensorDataset
-
-from ..ica.detect import est_spike_times
-from ..ica.utils import remove_bad_sources, remove_duplicates
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -121,12 +109,6 @@ class iVAE(nn.Module):
         x_recon = self.decode(z)
         prior_mean, prior_logvar = self.prior_params(u_onehot)
         return x_recon, z, enc_mean, enc_logvar, prior_mean, prior_logvar
-
-    def get_sources(self, x: torch.Tensor, u_onehot: torch.Tensor) -> torch.Tensor:
-        self.eval()
-        with torch.no_grad():
-            mean, _ = self.encode(x, u_onehot)
-        return mean
 
 
 def ivae_loss(
@@ -259,7 +241,7 @@ def train_ivae(
 
 
 # ---------------------------------------------------------------------------
-# Source extraction and spike detection
+# Source extraction
 # ---------------------------------------------------------------------------
 
 
@@ -293,7 +275,6 @@ def extract_sources(
 
 def ivae_decompose(
     X: np.ndarray,
-    fs: float,
     u_labels: np.ndarray,
     n_sources: int = 5,
     n_epochs: int = 200,
@@ -302,31 +283,32 @@ def ivae_decompose(
     prior_hidden: tuple[int, ...] = (64,),
     decoder_type: str = "linear",
     decoder_hidden: tuple[int, ...] = (128,),
-    sil_th: float = 0.9,
     batch_size: int = 512,
     sparsity_weight: float = 0.0,
     device: str | None = None,
     verbose: bool = True,
 ):
-    """Full iVAE pipeline: train -> extract -> detect -> dedup/filter.
+    """Build and train an iVAE, then return its encoder-mean sources.
+
+    The network is initialised from, and trained with, the global ``torch``
+    RNG; seed it beforehand for a repeatable run.
 
     Args:
         X: ``(n_features, n_samples)`` whitened extended signal.
-        fs: Sampling frequency, in Hz.
         u_labels: ``(n_samples,)`` auxiliary-variable labels (angle bins).
         n_sources: Latent dimensionality (set ~ number of GT MUs).
         n_epochs: Training epochs.
         lr: Learning rate.
         encoder_hidden / prior_hidden / decoder_type / decoder_hidden:
             Architecture knobs.
-        sil_th: SIL acceptance threshold for :func:`remove_bad_sources`.
         batch_size: Minibatch size.
         sparsity_weight: Kurtosis regulariser weight.
         device: Torch device.
         verbose: Print progress.
 
     Returns:
-        ``(sources_clean, spikes_clean, sil_clean, model, history)``.
+        ``(sources, model, history)``: the ``(n_sources, n_samples)``
+        encoder means, the trained model and the training history.
     """
     if device is None:
         device = DEVICE
@@ -353,102 +335,4 @@ def ivae_decompose(
     )
 
     sources = extract_sources(model, X, u_labels, device=device)
-
-    all_spikes: dict[int, np.ndarray] = {}
-    all_sil = np.zeros(n_sources)
-    for i in range(n_sources):
-        try:
-            sp, sil_val = est_spike_times(sources[i], fs)
-            all_spikes[i] = sp
-            all_sil[i] = sil_val
-        except Exception:
-            all_spikes[i] = np.array([], dtype=int)
-            all_sil[i] = 0.0
-
-    mu_filters = np.eye(n_features, n_sources)
-
-    sources_clean, spikes_clean, sil_clean, _ = remove_duplicates(
-        sources, all_spikes, all_sil, mu_filters, fs,
-        max_shift=0.1, tol=0.001, threshold=0.3,
-    )
-    sources_clean, spikes_clean, sil_clean, _ = remove_bad_sources(
-        sources_clean, spikes_clean, sil_clean,
-        mu_filters[:, : sources_clean.shape[0]],
-        threshold=sil_th, min_num_spikes=10,
-    )
-
-    if verbose:
-        n_found = sources_clean.shape[0]
-        print(f"  [iVAE] accepted {n_found} sources (sil_th={sil_th})", flush=True)
-
-    return sources_clean, spikes_clean, sil_clean, model, history
-
-
-# ---------------------------------------------------------------------------
-# Auxiliary-variable label builders
-# ---------------------------------------------------------------------------
-
-
-def make_segment_labels(n_samples: int, n_segments: int = 32) -> np.ndarray:
-    """Equal-length time-segment labels."""
-    labels = np.zeros(n_samples, dtype=int)
-    seg_len = n_samples // n_segments
-    for i in range(n_segments):
-        start = i * seg_len
-        end = n_samples if i == n_segments - 1 else (i + 1) * seg_len
-        labels[start:end] = i
-    return labels
-
-
-def bin_angle(angle: np.ndarray, n_bins: int = 24) -> np.ndarray:
-    """Quantile-bin a continuous angle trajectory into integer pose indices.
-
-    Equal-count (quantile) bins keep the auxiliary categories balanced on a
-    sinusoidal angle profile. Labels are remapped to a contiguous
-    ``[0, K)`` range with ``K <= n_bins``.
-    """
-    angle = np.asarray(angle, dtype=float)
-    edges = np.quantile(angle, np.linspace(0.0, 1.0, n_bins + 1))
-    raw = np.clip(np.digitize(angle, edges[1:-1]), 0, n_bins - 1)
-    uniq = np.unique(raw)
-    remap = {u: i for i, u in enumerate(uniq)}
-    return np.array([remap[v] for v in raw], dtype=int)
-
-
-def make_pose_labels(angle_profile: np.ndarray, n_whitened: int) -> np.ndarray:
-    """Align integer pose indices to the whitened-signal length.
-
-    Center-crops when the whitened signal is shorter than the raw angle
-    trajectory (the convolutive-extension edge trim). Expects
-    ``angle_profile`` to already be integer pose indices — bin a continuous
-    angle with :func:`bin_angle` first.
-    """
-    n_raw = len(angle_profile)
-    if n_whitened < n_raw:
-        offset = (n_raw - n_whitened) // 2
-        return angle_profile[offset : offset + n_whitened].astype(int)
-    return angle_profile[:n_whitened].astype(int)
-
-
-def make_combined_labels(
-    angle_profile: np.ndarray, n_whitened: int, n_time_segments: int = 8
-) -> tuple[np.ndarray, int]:
-    """Combine pose and within-pose time segments into a richer aux variable."""
-    pose_labels = make_pose_labels(angle_profile, n_whitened)
-    n_poses = int(pose_labels.max()) + 1
-
-    combined = pose_labels * n_time_segments
-    for p in range(n_poses):
-        mask = pose_labels == p
-        if mask.sum() == 0:
-            continue
-        indices = np.where(mask)[0]
-        n_p = len(indices)
-        seg_len = n_p // n_time_segments
-        for s in range(n_time_segments):
-            start = s * seg_len
-            end = n_p if s == n_time_segments - 1 else (s + 1) * seg_len
-            combined[indices[start:end]] += s
-
-    n_total = n_poses * n_time_segments
-    return combined.astype(int), n_total
+    return sources, model, history

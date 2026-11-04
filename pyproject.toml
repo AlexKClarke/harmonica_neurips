@@ -23,9 +23,12 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest"]
+# The vendored adapt_decomp v1.0.0 engine (run_adapt_v1, bench_adapt.py,
+# tune_adapt_v1.py) imports these at load time.
+adapt = ["optuna", "plotly", "seaborn", "loguru"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
 
 [tool.setuptools.package-data]
-"*" = ["README.md", "LICENSE_*"]
+"*" = ["README.md", "LICENSE_*", "LICENSE", "CITATION.cff", "*.yaml"]

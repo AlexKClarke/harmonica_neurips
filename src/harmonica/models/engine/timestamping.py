@@ -1,5 +1,4 @@
-"""Functions needed to convert time series into spike timestamps and
-assess the quality of these timestamps"""
+"""Peak finding, soft k-means spike timestamping and spike-triggered windows."""
 
 from typing import Tuple, Union
 
@@ -191,53 +190,3 @@ def timestamps_to_windows(
 
         signal_windows.append(w)
     return torch.stack(signal_windows)
-
-
-def find_quality_metric(
-    timestamps_1: torch.Tensor,
-    timestamps_2: torch.Tensor,
-    mode: str = "accuracy",
-    tolerance: int = 5,
-    max_shift: int = 100,
-) -> torch.Tensor:
-    """Matrix operation based implementation of quality metric finding
-    between two timestamp sets. If using precision or recall,
-    timestamps_1 is the prediction and timestamps_2 the ground truth"""
-
-    assert tolerance >= 0, "tolerance must be non-negative"
-    assert max_shift >= 0, "max_shift must be non-negative"
-
-    # Make sure timestamps on same device
-    timestamps_2 = timestamps_2.type_as(timestamps_1)
-
-    # Set tolerance aranges
-    tol_range = torch.arange(-tolerance, tolerance).type_as(timestamps_1)
-
-    # Create shifted versions of timestamp_1 with tolerance bands
-    expand_1 = timestamps_1.unsqueeze(0)
-    expand_1 = expand_1 - tol_range.unsqueeze(1)
-    expand_1 = expand_1.unsqueeze(-1).tile([1, 1, timestamps_2.shape[0]])
-
-    # Tile up timestamp_2
-    expand_2 = (
-        timestamps_2.unsqueeze(0)
-        .unsqueeze(0)
-        .tile([expand_1.shape[0], expand_1.shape[1], 1])
-    )
-
-    # Iterate through shift amounts
-    matches = []
-    for shift in range(-max_shift, max_shift):
-        matches.append((expand_1 + shift == expand_2).any(2).any(0).sum())
-    matches = torch.stack(matches).max()
-
-    if mode == "accuracy":
-        return 100 * matches.divide(
-            timestamps_1.shape[0] + timestamps_2.shape[0] - matches
-        )
-    elif mode == "precision":
-        return 100 * matches.divide(timestamps_1.shape[0])
-    elif mode == "recall":
-        return 100 * matches.divide(timestamps_2.shape[0])
-    else:
-        raise ValueError("Specified quality metric not available.")

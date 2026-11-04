@@ -354,7 +354,6 @@ def run_glaser_cyclostationary(
 
     # Preprocess full signal
     z_w = _preprocess(emg, R, d_eff)
-    D = z_w.shape[0]
 
     # Seed: classical CKC on the reference window → seed filters
     z_w_ref = z_w[:, a1:a2]

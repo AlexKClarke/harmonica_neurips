@@ -17,7 +17,10 @@ ground truth happens externally via
 - :mod:`.kramberger` — Kramberger & Holobar 2021 (needs the joint angle)
 - :mod:`.chen`       — Chen et al. 2020 (adaptive CKC)
 - :mod:`.yeung`      — Yeung et al. 2024 (directional-forgetting RLS)
-- :mod:`.adapt`      — Mendez Guerra et al. 2024 (vendored reference code)
+- :mod:`.adapt`      — Mendez Guerra et al. 2024, adapt_decomp v0 engine
+- :mod:`.adapt_v1`   — Mendez Guerra et al. 2024, adapt_decomp v1.0.0 engine
+  (the paper's Adapt row; needs the ``[adapt]`` extra, so it is imported
+  lazily on first use of :func:`run_adapt_v1`)
 - :mod:`.tcl`, :mod:`.ivae` — identifiable nonlinear ICA (TCL, iVAE)
 """
 from __future__ import annotations
@@ -32,8 +35,19 @@ from .signal_space import run_signal_space
 from .tcl import run_tcl
 from .yeung import run_yeung
 
+
+def __getattr__(name: str):
+    # run_adapt_v1 pulls in the vendored v1 engine and its dependencies
+    # (optuna, plotly, ...); import it only when asked for.
+    if name == "run_adapt_v1":
+        from .adapt_v1 import run_adapt_v1
+        return run_adapt_v1
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
 __all__ = [
     "run_adapt",
+    "run_adapt_v1",
     "run_chen",
     "run_glaser",
     "run_glaser_cyclostationary",

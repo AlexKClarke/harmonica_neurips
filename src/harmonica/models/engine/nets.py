@@ -1,8 +1,9 @@
+"""Compensator networks: context-conditioned invertible maps A(t) of the signal."""
+
 import math
 from typing import Sequence, Optional, List
 import torch
 import torch.nn as nn
-
 
 
 class Reshape(nn.Module):
@@ -28,7 +29,6 @@ class ConditionalAffine(nn.Module):
         dropout: Dropout probability
         output_activation: Optional activation on params
         use_output_bias: Whether to use bias on output layer
-        init_std: Std for near-zero initialization of hidden layers
         n_layers: Number of affine layers (default=1)
     """
     def __init__(
@@ -40,7 +40,6 @@ class ConditionalAffine(nn.Module):
         dropout: Optional[float] = None,
         output_activation: Optional[str] = None,
         use_output_bias: bool = True,
-        init_std: Optional[float] = None,
         n_layers: int = 1,
     ):
         super().__init__()
@@ -198,165 +197,6 @@ class ConditionalAffine(nn.Module):
         for i in range(self.n_layers - 1, -1, -1):
             # Apply inverse affine transform
             x = self._apply_single_affine(x, all_params[i], inverse=True)
-
-        return x
-
-
-class ConditionalGivensMatrix(ConditionalAffine):
-    """
-    Conditional affine transform with learned Givens-rotation mixing
-    between layers instead of LU.
-
-    Each mixing layer uses R(u) = Π_k G_k(u), where G_k is a 2D rotation
-    acting on channel pair (i_k, j_k) with angle θ_k(u).
-
-    This is far cheaper than LU, still invertible, and expressive enough
-    to capture time-varying volume-conductor distortions.
-    """
-
-    def __init__(
-        self,
-        input_shape: Sequence[int],
-        output_shape: Sequence[int],
-        out_chans_per_layer: List[int],
-        n_rotations: int = 10,
-        dropout: Optional[float] = None,
-        init_std: Optional[float] = None,
-        n_layers: int = 1,
-    ):
-        super().__init__(
-            input_shape=input_shape,
-            output_shape=output_shape,
-            out_chans_per_layer=out_chans_per_layer,
-            dropout=dropout,
-            init_std=init_std,
-            n_layers=n_layers,
-        )
-
-        self.d = math.prod(output_shape)
-        self.n_rot = n_rotations
-
-        # Define fixed random channel pairs for Givens rotations
-        idx = torch.randperm(self.d)
-        self.register_buffer('i_idx', idx[:n_rotations])
-        self.register_buffer('j_idx', idx[-n_rotations:])
-        self.i_idx: torch.Tensor
-        self.j_idx: torch.Tensor
-
-        # Context → rotation angles network (per layer)
-        self.angle_nets = nn.ModuleList([
-            nn.Sequential(
-                nn.Linear(input_shape[-1], 64),
-                nn.ReLU(),
-                nn.Linear(64, n_rotations)
-            ) for _ in range(n_layers - 1)
-        ])
-
-        # Angle cache (initialized via init_cache)
-        self.cached_angles: Optional[List[torch.Tensor]] = None
-
-        # Initialize Givens rotations to identity
-        self._init_identity()
-
-    def _init_identity(self):
-        """
-        Initialize all Givens rotations to identity by forcing
-        angle_nets to output zeros for any context.
-        """
-        for net in self.angle_nets:
-            for m in net.modules():
-                if isinstance(m, nn.Linear):
-                    nn.init.zeros_(m.weight)
-                    if m.bias is not None:
-                        nn.init.zeros_(m.bias)
-                elif isinstance(m, nn.BatchNorm1d):
-                    nn.init.ones_(m.weight)
-                    nn.init.zeros_(m.bias)
-
-    def init_cache(self, signal_length: int, device: torch.device, dtype: torch.dtype):
-        """Initialize params and angles cache to zeros."""
-        super().init_cache(signal_length, device, dtype)
-        self.cached_angles = [
-            torch.zeros([signal_length, self.n_rot], dtype=dtype, device=device)
-            for _ in range(self.n_layers - 1)
-        ]
-
-    def update_cache(self, context: torch.Tensor):
-        """Update params and angles cache from context."""
-        super().update_cache(context)
-        was_training = self.training
-        self.eval()
-        with torch.no_grad():
-            self.cached_angles = [net(context) for net in self.angle_nets]
-        if was_training:
-            self.train()
-
-    def _apply_givens(self, x: torch.Tensor, angles: torch.Tensor, inverse: bool = False):
-        """
-        Apply all Givens rotations to x.
-        x: [batch, d]
-        angles: [batch, n_rot]
-        """
-
-        for k in range(self.n_rot):
-            i = self.i_idx[k]
-            j = self.j_idx[k]
-
-            theta = angles[:, k]
-            c = torch.cos(theta)
-            s = torch.sin(theta)
-
-            xi = x[:, i].clone()
-            xj = x[:, j].clone()
-
-            if inverse:
-                # inverse rotation: angle negated
-                x[:, i] =  c * xi + s * xj
-                x[:, j] = -s * xi + c * xj
-            else:
-                # forward rotation
-                x[:, i] =  c * xi - s * xj
-                x[:, j] =  s * xi + c * xj
-
-        return x
-
-    def forward(self, x, context, use_cache=False, indices=None):
-        """Affine flows + Givens-rotation mixing."""
-        if use_cache:
-            assert self.params is not None and self.cached_angles is not None, \
-                "Cache not initialized, call init_cache first"
-            all_params = [p if indices is None else p[indices] for p in self.params]
-            all_angles = [a if indices is None else a[indices] for a in self.cached_angles]
-        else:
-            all_params = self.get_params(context)
-            all_angles = [net(context) for net in self.angle_nets]
-
-        for layer_idx in range(self.n_layers):
-            x = self._apply_single_affine(x, all_params[layer_idx], inverse=False)
-
-            if layer_idx < self.n_layers - 1:
-                x = self._apply_givens(x, all_angles[layer_idx], inverse=False)
-
-        return x
-
-    def inverse(self, z, context, use_cache=False, indices=None):
-        """Inverse is simply reversed affine + inverse Givens rotations."""
-        if use_cache:
-            assert self.params is not None and self.cached_angles is not None, \
-                "Cache not initialized, call init_cache first"
-            all_params = [p if indices is None else p[indices] for p in self.params]
-            all_angles = [a if indices is None else a[indices] for a in self.cached_angles]
-        else:
-            all_params = self.get_params(context)
-            all_angles = [net(context) for net in self.angle_nets]
-
-        x = z
-
-        for layer_idx in reversed(range(self.n_layers)):
-            if layer_idx < self.n_layers - 1:
-                x = self._apply_givens(x, all_angles[layer_idx], inverse=True)
-
-            x = self._apply_single_affine(x, all_params[layer_idx], inverse=True)
 
         return x
 

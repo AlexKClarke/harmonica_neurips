@@ -1,15 +1,9 @@
-"""ICA-tier utilities — extension, orthogonalization, dedup, windowing helpers.
-
-Grouped here because they're either (a) used by ``run_ica_loop`` but aren't
-algorithmically part of ICA, or (b) generic spike-set manipulation helpers
-that the higher tiers also use.
+"""ICA-tier utilities — Toeplitz extension, Gram-Schmidt, duplicate and
+bad-source removal (used by ``run_ica_loop`` and the baselines).
 """
 from __future__ import annotations
 
-from typing import Any
-
 import numpy as np
-import pandas as pd
 from scipy.linalg import toeplitz
 
 from ..evaluate import get_bin_spikes, match_spike_trains, max_xcorr
@@ -183,70 +177,3 @@ def remove_bad_sources(
     new_filters = np.delete(mu_filters, bad, axis=1)
 
     return new_sources, new_spikes, new_sil, new_filters
-
-
-# =============================================================================
-# Windowing helpers
-# =============================================================================
-
-
-def map_source_from_window_to_global_time_idx(
-    sources: np.ndarray,
-    spikes: dict[int, np.ndarray],
-    win: tuple[int, int],
-    n_time_samples: int,
-) -> tuple[np.ndarray, dict[int, np.ndarray]]:
-    """Lift window-local sources and spikes back to global-recording time.
-
-    Args:
-        sources: ``(n_mu, win_len)`` window-local sources.
-        spikes: ``{i: spike_indices}`` — indices into window frames.
-        win: ``(start, end)`` sample indices into the global recording.
-        n_time_samples: Total samples in the global recording.
-
-    Returns:
-        ``(new_sources, new_spikes)`` where ``new_sources`` is zero-padded
-        outside the window and ``new_spikes[i] = spikes[i] + win[0]``.
-    """
-    new_sources = np.zeros((sources.shape[0], n_time_samples))
-    new_spikes: dict[int, np.ndarray] = {i: np.array([]) for i in range(sources.shape[0])}
-    for i in range(new_sources.shape[0]):
-        new_sources[i, win[0] : win[1]] = sources[i, :]
-        new_spikes[i] = np.asarray(spikes[i]) + win[0]
-    return new_sources, new_spikes
-
-
-# =============================================================================
-# Dict / DataFrame conversions
-# =============================================================================
-
-
-def spike_dict_to_long_df(
-    spike_dict: dict[Any, np.ndarray],
-    sort: bool = True,
-    fsamp: float = 2048,
-) -> pd.DataFrame:
-    """Convert ``{source_id: spike_sample_indices}`` to a long DataFrame.
-
-    Args:
-        spike_dict: Keys are source IDs, values are arrays of spike sample
-            indices.
-        sort: If True, sort by ``(source_id, spike_time)``.
-        fsamp: Sampling frequency used to convert sample indices to times
-            in seconds.
-
-    Returns:
-        DataFrame with columns ``source_id`` and ``spike_time`` (seconds).
-    """
-    rows: list[dict[str, Any]] = []
-    for unit_id, spikes in spike_dict.items():
-        for t in spikes:
-            rows.append({"source_id": unit_id, "spike_time": t / fsamp})
-
-    if not rows:
-        return pd.DataFrame(columns=["source_id", "spike_time"])
-
-    df = pd.DataFrame(rows)
-    if sort:
-        df = df.sort_values(by=["source_id", "spike_time"]).reset_index(drop=True)
-    return df

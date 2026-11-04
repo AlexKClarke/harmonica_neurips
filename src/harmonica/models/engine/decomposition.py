@@ -1,35 +1,18 @@
-"""The main function for running a decomposition"""
+"""DecompositionModule: the per-unit training step and neural peel-off."""
 
-from typing import Optional, List, Tuple, Union
+from typing import Optional, Tuple, Union
 
 import torch
 
-from .state import State
-from .configs import Config
-from .logger import Logger
-from .timestamping import (
-    signal_to_timestamps,
-    find_quality_metric,
-    timestamps_to_windows,
-)
-from .preprocessing import (
-    low_pass_filter,
-    high_pass_filter,
-    extend,
-    whiten,
-)
-from .plotting import plot_sources
+from .timestamping import signal_to_timestamps, timestamps_to_windows
 
 
 class DecompositionModule(torch.nn.Module):
-    """
-    Class implementing decomposition
-    """
+    """Separation vector + compensator training and peel-off on a :class:`State`.
 
-    def __init__(self):
-        super().__init__()
-        self._plot_fig = None
-        self._plot_axes = None
+    The caller sets ``config`` and ``state`` before use (see
+    :func:`harmonica.baselines.signal_space.run_signal_space`).
+    """
 
     def calculate_source(
         self, signal: torch.Tensor, compensated: bool = False
@@ -125,13 +108,6 @@ class DecompositionModule(torch.nn.Module):
                 isi,
             )
 
-    @staticmethod
-    def baseline_drift(source: torch.Tensor, n_segments: int = 20) -> torch.Tensor:
-        """Variance of segment means — measures low-frequency baseline drift."""
-        chunks = source.tensor_split(n_segments)
-        segment_means = torch.stack([c.mean() for c in chunks])
-        return segment_means.var()
-
     def joint_step(self, use_compensation: bool):
         """Joint optimization of separation and compensation.
 
@@ -212,7 +188,8 @@ class DecompositionModule(torch.nn.Module):
         return isi
 
     def peel_off(self, timestamps: torch.Tensor):
-        """Peel off to prevent repeats"""
+        """Neural peel-off: subtract the compensated-frame STA, mapped back
+        through the inverse compensator, at every timestamp."""
         # First get the spike triggered windows using cached params
         comp_signal = self.state.compensation_weights.forward(
             self.state.signal, self.state.auxiliary, use_cache=True
@@ -235,252 +212,3 @@ class DecompositionModule(torch.nn.Module):
                 sta, self.state.auxiliary, use_cache=True, indices=slice(start, end)
             )
             self.state.signal[start:end] -= local_sta
-
-    def run_decomposition(self):
-        """Runs a complete source independent component analysis on the entire signal"""
-
-        # Initialize all components
-        self.state.init_all()
-
-        self._comp_step_count = 0
-        self._cached_spike_ts = None
-
-        # Run decomposition steps
-        patience = 0
-        best_isi = self.state.signal.shape[0]
-        isi = self.state.signal.shape[0]
-        early_end = False
-        plot = False
-        silhouette = torch.tensor(0.0)
-        num_peaks = 0
-        ref_drift = 1.0
-
-        for steps in range(self.config.max_decomp_steps):
-
-            use_compensation = steps >= self.config.compensation_delay
-
-            # Check silhouette at compensation delay boundary and record baseline drift
-            if steps == self.config.compensation_delay:
-                _, silhouette = self.calculate_timestamps(True)
-                if silhouette < self.config.min_sil_for_compensation:
-                    early_end = True
-                    if self.config.save_results or self.config.verbose_mode:
-                        print(f"    Step {steps:4d}: Low silhouette ({silhouette:.3f}), ending early", flush=True)
-                with torch.no_grad():
-                    source_ref = self.calculate_source(self.state.signal, compensated=False)
-                    source_ref = (source_ref - source_ref.mean()) / source_ref.std()
-                    ref_drift = max(self.baseline_drift(source_ref).item(), 1.0)
-
-            # Check compensation stability periodically
-            if use_compensation and not early_end and steps > self.config.compensation_delay:
-                if self.config.log_every_n_steps > 0 and steps % self.config.log_every_n_steps == 0:
-                    with torch.no_grad():
-                        comp_source = self.calculate_source(self.state.signal, compensated=True)
-                        comp_source = (comp_source - comp_source.mean()) / comp_source.std()
-                        current_drift = self.baseline_drift(comp_source)
-                    if current_drift > ref_drift * self.config.max_compensation_drift:
-                        early_end = True
-                        if self.config.save_results or self.config.verbose_mode:
-                            print(
-                                f"    Step {steps:4d}: Compensation drift {current_drift:.3f} > "
-                                f"{self.config.max_compensation_drift:.1f}x reference {ref_drift:.3f}, stopping",
-                                flush=True,
-                            )
-
-            # Joint optimization step
-            isi = self.joint_step(use_compensation and not early_end)
-
-            # Analyze ISI for early stopping
-            if not early_end:
-                if best_isi > isi:
-                    patience = 0
-                    best_isi = isi
-                else:
-                    patience += 1
-                    if patience > self.config.max_decomp_patience:
-                        early_end = True
-
-            # Log progress periodically
-            should_log = (
-                (self.config.save_results or self.config.verbose_mode)
-                and self.config.log_every_n_steps > 0
-                and (steps + 1) % self.config.log_every_n_steps == 0
-            )
-            if should_log:
-                phase = "sep+comp" if steps >= self.config.compensation_delay else "sep"
-                # Calculate current silhouette for logging
-                timestamps_log, silhouette_log = self.calculate_timestamps(True)
-                num_peaks = timestamps_log.shape[0]
-                print(
-                    f"    Step {steps + 1:4d}/{self.config.max_decomp_steps} | "
-                    f"Phase: {phase:8s} | "
-                    f"ISI: {int(isi):6d} | "
-                    f"Peaks: {num_peaks:4d} | "
-                    f"Sil: {silhouette_log:.3f} | "
-                    f"Patience: {patience:3d}/{self.config.max_decomp_patience}",
-                    flush=True,
-                )
-
-            # Check if we should plot
-            plot = False
-            if self.config.source_plot_per_n_steps:
-                if steps % self.config.source_plot_per_n_steps == 0:
-                    plot = True
-            elif self.config.source_plot_at_end:
-                if steps == (self.config.max_decomp_steps - 1) or early_end:
-                    plot = True
-
-            # Get source and timestamps if needed
-            timestamps: torch.Tensor = torch.tensor([])
-            silhouette = torch.tensor(0.0)
-            if plot or early_end or steps == (self.config.max_decomp_steps - 1):
-                timestamps, silhouette = self.calculate_timestamps(True)
-
-            # Plot if needed
-            if plot:
-                with torch.no_grad():
-                    self.eval()
-                    source = self.calculate_source(self.state.signal, compensated=True)
-                    self._plot_fig, self._plot_axes = plot_sources(
-                        source.subtract(source.mean()).divide(source.std()),
-                        [timestamps],
-                        self.state.exponent_tensor,
-                        silhouette.unsqueeze(0),
-                        self._plot_fig,
-                        self._plot_axes,
-                        save_dir=self._save_dir,
-                    )
-
-            if early_end:
-                break
-
-        # Get final timestamps and silhouette
-        timestamps, silhouette = self.calculate_timestamps(True)
-
-        # Check if source meets quality criteria
-        if silhouette < self.config.acceptance_silhouette:
-            message = "reject low silhouette source"
-            success = False
-        elif timestamps.shape[0] < self.config.min_peaks_in_source:
-            message = "reject source below min peak number"
-            success = False
-        else:
-            # Check if source is a repeat
-            if len(self.state.all_timestamp_lib) > 0:
-                max_accuracy = torch.stack(
-                    [
-                        find_quality_metric(
-                            timestamps,
-                            prev_timestamps,
-                            "accuracy",
-                            self.config.accuracy_tolerance,
-                            self.config.extension_factor,
-                        )
-                        for prev_timestamps in self.state.all_timestamp_lib
-                    ]
-                ).max()
-
-                # End run if repeat with optional peel off
-                if max_accuracy > self.config.acceptance_max_accuracy:
-                    if max_accuracy > 90:
-                        self.peel_off(timestamps)
-                    success = False
-                    message = "reject repeat source"
-                else:
-                    success = True
-                    message = "new unit found"
-            else:
-                success = True
-                message = "new unit found"
-
-        # If source is good, add to libraries
-        if success:
-            if timestamps.shape[0] > 1:
-                self.peel_off(timestamps)
-                self.state.remove_activity(timestamps)
-            
-            self.state.all_timestamp_lib.append(timestamps.sort()[0])
-
-        return success, message
-
-    def run(
-        self,
-        signal: torch.Tensor,
-        config: Config,
-        auxiliary: Optional[torch.Tensor] = None,
-    ) -> List[torch.Tensor]:
-        """Sets optimiser and runs
-
-        Args:
-            signal: Input signal tensor
-            config: Configuration object
-            auxiliary: Optional external auxiliary signal of shape (T, D). If None,
-                      positional encodings are generated.
-        """
-
-        # Store config
-        self.config = config
-
-        # Preprocess signal
-        device = signal.device
-        signal = signal.cpu().float()
-        if self.config.low_pass_cutoff is not None:
-            assert self.config.sampling_frequency is not None, \
-                "Sampling frequency must be set in config if filtering."
-            signal = low_pass_filter(
-                signal, self.config.sampling_frequency, self.config.low_pass_cutoff
-            )
-        if self.config.high_pass_cutoff is not None:
-            assert self.config.sampling_frequency is not None, \
-                "Sampling frequency must be set in config if filtering."
-            signal = high_pass_filter(
-                signal, self.config.sampling_frequency, self.config.high_pass_cutoff
-            )
-        signal = extend(signal, self.config.extension_factor)
-        signal = whiten(signal, self.config.whitening_method)
-        signal[: self.config.extension_factor, :] = 0
-        signal[-self.config.extension_factor :, :] = 0
-        signal = signal.to(device)
-
-        # Create state with preprocessed signal
-        self.state = State(signal, self.config, auxiliary)
-
-        # Setup logger
-        logger = Logger(self.config)
-        logger.setup()
-        self._save_dir = logger.run_dir
-
-        # Start the projection pursuit iterations
-        patience = 0
-        for iteration in range(self.config.max_iterations):
-
-            # First run decomp
-            success, message = self.run_decomposition()
-
-            # Increment patience if failure
-            if success:
-                patience = 0
-            else:
-                patience += 1
-
-            # Log iteration
-            logger.log_iteration(
-                iteration=iteration,
-                success=success,
-                message=message,
-                num_units=len(self.state.all_timestamp_lib),
-                patience=patience,
-                max_iterations=self.config.max_iterations,
-                iteration_patience=self.config.iteration_patience,
-            )
-
-            # Finish finding sources if patience is broken
-            if patience == self.config.iteration_patience:
-                logger.log_early_stopping()
-                break
-
-        # Save results and cleanup
-        logger.save_results(self.state.all_timestamp_lib)
-        logger.close()
-
-        return self.state.all_timestamp_lib

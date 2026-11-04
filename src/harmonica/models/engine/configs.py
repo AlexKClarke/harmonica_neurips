@@ -1,3 +1,5 @@
+"""Engine configuration: the Config base and the SurfaceConfig preset."""
+
 from typing import Optional, Sequence
 
 from pydantic import BaseModel, computed_field
@@ -29,7 +31,7 @@ class Config(BaseModel):
 
     # Compensation parameters / hyperparameters
     compensation_lr: float = 0.0001  # *
-    compensation_model: str = "lowrank"  # "affine", "givens", or "lowrank"
+    compensation_model: str = "lowrank"  # "lowrank" or "affine"
     compensation_n_layers: int = 1  # Number of compensation layers
     compensation_hidden_layers: Sequence[int] = (32, 32)
     dropout: float = 0.3
@@ -108,41 +110,6 @@ class Config(BaseModel):
     @property
     def peel_off_window_size(self) -> int:
         return round(self.peel_off_window_ms / 1000 * self.sampling_frequency)
-
-
-class IntramuscularConfig(Config):
-
-    # Preprocessing parameters
-    sampling_frequency: float = 10240
-    high_pass_cutoff: Optional[float] = 100
-    extension_factor: int = 100
-
-    # Activity index parameters (ms)
-    act_min_peak_separation_ms: float = 3.0
-    act_min_peak_height: float = 100.0
-
-    # Compensation parameters / hyperparameters
-    compensation_hidden_layers: Sequence[int] = (64, 64)
-    dropout: float = 0.5
-
-    # ICA parameters / hyperparameters
-    max_exponent: float = 5.0
-    exponent_increment: float = 0.1
-    nonlin_scale: float = 1
-    compensation_delay: int = 150
-
-    # Source timestamping parameters (ms)
-    min_peak_separation_ms: float = 39.0
-
-    # Main run parameters
-    max_iterations: int = 100
-
-    # Projection pursuit controls
-    iteration_patience: int = 20
-    min_peaks_in_source: int = 20
-    accuracy_tolerance_ms: float = 0.5
-    accuracy_max_shift_ms: float = 2.0
-    peel_off_window_ms: float = 0.5
 
 
 class SurfaceConfig(Config):

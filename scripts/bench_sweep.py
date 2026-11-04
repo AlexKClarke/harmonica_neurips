@@ -1,24 +1,23 @@
 #!/usr/bin/env python
-"""Single-config hparam sweep — one method + one kwargs set → one CSV.
+"""Per-unit benchmark — one method + one kwargs set → one CSV.
 
-Runs the specified per-unit refinement method on every recording in
-``--val-set`` with custom per-method kwargs, and writes a long-format CSV
-with P, R, F1 for the unrefined ICA source (``*_ica`` columns) and for the
-refined source. Each ground-truth unit is refined from its best-matching
-ICA source (an oracle pairing, used for the per-unit ablations). One
-invocation = one config.
+Runs FastICA on every recording in ``--val-set`` and, for each ground-truth
+unit, takes its best-matching ICA source (an oracle pairing, used for the
+per-unit ablations) and refines it with the given method. Writes a
+long-format CSV with P, R, F1 of the unrefined ICA source (``*_ica``
+columns) and of the refined source. One invocation = one config.
 
-Parallelise by launching many invocations (e.g., SLURM array), one per
-config.
+``--method ica`` skips refinement: ``p``/``r``/``f1`` then equal the
+``*_ica`` columns. This is the ICA / cBSS reference row.
 
 Example:
     python scripts/bench_sweep.py \\
         --data-dir /path/ch070 \\
         --val-set experiments/lists/ch070_all.txt \\
-        --method iterative_refractory \\
-        --kwargs '{"mc":0.3,"lam":2.0}' \\
-        --tag iref_mc03_lam2 \\
-        --output results/sweep_phase1/iref_mc03_lam2.csv
+        --method harmonica_style \\
+        --kwargs '{"comp_loss":"kurtosis"}' \\
+        --tag loss_kurtosis_seed0 --R 8 \\
+        --output results/ch070_loss_kurtosis_seed0.csv
 """
 from __future__ import annotations
 
@@ -40,27 +39,16 @@ from harmonica.models.harmonica_signal_space import (
 )
 from harmonica.ica.algorithm import peel_off as _peel_off_classical
 from harmonica.nonstationary.detect import detect_best
-from harmonica.nonstationary.harmonica import (
-    iternn_refine,
-    persample_refine,
-)
 from harmonica.nonstationary.pipelines import _prf, preprocess, run_ica
-from harmonica.nonstationary.refractory import (
-    refine_harmonica_style,
-    refine_iterative_refractory,
-)
+from harmonica.nonstationary.refractory import refine_harmonica_style
 
-# Methods that take anchor_spikes (5th positional arg)
-ANCHORED = {
-    "iterative_refractory": refine_iterative_refractory,
-    "harmonica_style":      refine_harmonica_style,
-    "signal_space":         refine_signal_space_comp_warmstart,
+# Per-unit refiners: fn(z_w, w_ica, t_norm, FS, anchor_spikes, seed=..., **kwargs)
+REFINERS = {
+    "harmonica_style": refine_harmonica_style,
+    "signal_space":    refine_signal_space_comp_warmstart,
 }
-# Methods that do not take anchors
-ANCHORLESS = {
-    "timenn": persample_refine,   # kwargs: epochs, loss_type, max_corr
-    "iternn": iternn_refine,      # kwargs: mc_schedule, ep_schedule, select, loss_type, fsamp
-}
+# No refinement: score the ICA source itself (the ICA / cBSS reference row).
+ICA_ONLY = "ica"
 
 
 def load_recording(path: Path) -> tuple[np.ndarray, int, dict]:
@@ -81,18 +69,7 @@ def load_recording(path: Path) -> tuple[np.ndarray, int, dict]:
 
 
 def run_method(method: str, kwargs: dict, z_w, w_ica, t_norm, FS, anchor_sp, nn_seed):
-    if method in ANCHORED:
-        fn = ANCHORED[method]
-        return fn(z_w, w_ica, t_norm, FS, anchor_sp, seed=nn_seed, **kwargs)
-    if method == "timenn":
-        return persample_refine(z_w, w_ica, t_norm, seed=nn_seed, **kwargs)
-    if method == "iternn":
-        # iternn_refine returns (filters, spikes_dict, source, sils)
-        _, _, source, _ = iternn_refine(
-            z_w, w_ica, t_norm, fsamp=FS, seed=nn_seed, **kwargs
-        )
-        return source
-    raise ValueError(f"unknown method: {method}")
+    return REFINERS[method](z_w, w_ica, t_norm, FS, anchor_sp, seed=nn_seed, **kwargs)
 
 
 def main() -> int:
@@ -101,7 +78,8 @@ def main() -> int:
     ap.add_argument("--val-set",  type=Path, required=True,
                     help="Text file with one dataset stem per line")
     ap.add_argument("--method", required=True,
-                    choices=sorted(list(ANCHORED) + list(ANCHORLESS)))
+                    choices=sorted([*REFINERS, ICA_ONLY]),
+                    help="per-unit refiner, or 'ica' to score the ICA sources unrefined")
     ap.add_argument("--kwargs", default="{}",
                     help="JSON dict of method kwargs (e.g. '{\"mc\":0.3}')")
     ap.add_argument("--tag", required=True,
@@ -125,6 +103,8 @@ def main() -> int:
         ),
     )
     args = ap.parse_args()
+    if args.method == ICA_ONLY and args.peel_mode == "refine":
+        ap.error("--peel-mode refine needs a refiner; --method ica does not refine")
 
     kwargs = json.loads(args.kwargs)
     val_names = [l.strip() for l in args.val_set.read_text().splitlines() if l.strip()]
@@ -181,14 +161,18 @@ def main() -> int:
                 n_rows = 0
                 for gid, ps in items:
                     eid = ps["est_id"]
-                    w_ica = filters[:, eid] / np.linalg.norm(filters[:, eid])
-                    ica_sp = spk[eid].astype(int)
-                    source = run_method(
-                        args.method, kwargs,
-                        z_w_local, w_ica, t_norm, FS, ica_sp, args.nn_seed,
-                    )
-                    sp, _ = detect_best(source, FS, T)
-                    p, r, f1 = _prf(sp, gt[gid], FS)
+                    if args.method == ICA_ONLY:
+                        p, r, f1 = ps["precision"], ps["recall"], ps["f1"]
+                        sp = None
+                    else:
+                        w_ica = filters[:, eid] / np.linalg.norm(filters[:, eid])
+                        ica_sp = spk[eid].astype(int)
+                        source = run_method(
+                            args.method, kwargs,
+                            z_w_local, w_ica, t_norm, FS, ica_sp, args.nn_seed,
+                        )
+                        sp, _ = detect_best(source, FS, T)
+                        p, r, f1 = _prf(sp, gt[gid], FS)
                     if args.peel_mode == "refine" and len(sp) > 0:
                         z_w_local, _, _ = _peel_off_classical(
                             z_w_local, sp.astype(int), fsamp=float(FS),

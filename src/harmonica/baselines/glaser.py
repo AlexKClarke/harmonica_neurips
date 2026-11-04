@@ -11,8 +11,8 @@ assessment.
 
 This module implements the **simplified "segmented cBSS + stitch"** version
 described in the paper's introduction. The paper's full *cyclostationary CKC*
-with PNR-gated online tracking (Pseudocode 1, §II-C) is a deeper rewrite
-left for a v2.
+with PNR-gated online tracking (Pseudocode 1, §II-C) is
+:mod:`.glaser_cyclostationary`.
 
 Re-uses only:
 - :func:`harmonica.ica.algorithm.run_ica_loop` as the cBSS kernel

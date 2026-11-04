@@ -12,9 +12,15 @@ Port of Algorithm 1 (§2.3). Core ideas:
 - ``Ψ_mem``: FIFO buffer of cardinality ``N`` of extended observations
   at recent spike times. Filter updated via
   ``v = mean(z̃_Ψ − μ̃z*)`` over the buffer (Eq. 9).
-- Spike detection: rectified-peak z-score threshold ``τ = 3.3``.
+- Spike detection: z-score threshold ``τ_z`` on the rectified peak
+  amplitudes of each window.
 - Spike centroid ``c_hi = (v^T Σ^{*-1} v)²`` (Eq. 10); noise centroid
   updated with the forgetting factor (Eq. 11).
+
+The peaks above ``τ_z`` serve twice: they are appended to ``Ψ_mem`` (and so
+update the filter) and they are the reported spikes. There is no separate
+output decision, e.g. against the centroids ``c_hi`` / ``c_lo``, which are
+tracked but not used for detection.
 
 Paper parameter values: ``λ = 0.985``, ``|Ψ_mem| = 110``, ``τ_z = 3.3``.
 """
@@ -27,7 +33,6 @@ from scipy.signal import find_peaks
 from sklearn.decomposition import PCA
 
 from ..ica.algorithm import run_ica_loop
-from ..ica.detect import est_spike_times
 from ..ica.utils import extension
 from ..ica.whitening import whitening as _whiten
 
@@ -51,10 +56,9 @@ def run_yeung(
     z_threshold: float = 2.5,
     min_dist_ms: float = 10.0,
     cov_reg: float = 1e-3,
-    gate_sil: float | None = None,
     verbose: bool = False,
 ) -> dict[int, np.ndarray]:
-    """Yeung 2024 adaptive decoding — calibration (our ICA) → online update.
+    """Yeung 2024 adaptive decoding — FastICA calibration → online update.
 
     Args:
         emg: ``(n_channels, n_samples)`` channels-first EMG.
@@ -68,19 +72,18 @@ def run_yeung(
         forgetting: EMA forgetting factor ``λ`` (paper default 0.985).
         psi_size: Capacity of the observation buffer ``|Ψ_mem|``
             (paper default 110).
-        z_threshold: z-score cutoff for accepting spike candidates into
-            ``Ψ_mem``. The paper uses **3.3**, tuned for ECRB isometric
-            recordings (~10-15 MUs). Our default **2.5** is a compromise
-            that works better on dense multi-MU recordings like ch070
-            (~42 MUs / rec), where many co-firing spikes compress the
-            z-score distribution and ``3.3`` rejects legitimate spikes.
-            Override for ECRB-like data.
+        z_threshold: z-score cutoff on the rectified peak amplitudes of
+            each window. The peaks above it are both added to ``Ψ_mem``
+            and returned as spikes. The paper uses 3.3; the default here is
+            2.5, and ``experiments/table1_baselines.sh`` runs 2.0.
         min_dist_ms: Min inter-peak spacing, in ms.
         cov_reg: Ridge regulariser on ``Σ*`` before inversion.
         verbose: Per-stage progress.
 
     Returns:
-        ``{mu_id: sorted global spike sample indices}``.
+        ``{mu_id: sorted global spike sample indices}``: the calibration
+        spikes followed by the z-gated peaks of every online window,
+        deduplicated at 10 ms; units with fewer than 5 spikes are dropped.
     """
     C, T = emg.shape
     emg = np.asarray(emg, dtype=np.float32)
@@ -88,7 +91,7 @@ def run_yeung(
     if T_calib >= T:
         raise ValueError(f"calib_s={calib_s}s exceeds signal {T/FS:.2f}s")
 
-    # ---- Calibration via our ICA ----------------------------------
+    # ---- Calibration via FastICA ----------------------------------
     emg_calib = emg[:, :T_calib]
     z_ext_calib_full = extension(emg_calib, ext_fact)
     D_full = z_ext_calib_full.shape[0]
@@ -198,16 +201,6 @@ def run_yeung(
             if len(spike_peaks) == 0:
                 continue
 
-            # Opt-in, off by default (gated adaptation): if this MU's window source is already a clean
-            # spike train, freeze it — report spikes but skip the v/centroid updates
-            # below, which otherwise drift good filters on stationary data. Recovers the
-            # frozen benefit while still adapting degrading MUs.
-            if gate_sil is not None:
-                _, _sil_j = est_spike_times(src, FS)
-                if _sil_j >= gate_sil:
-                    all_spikes[j].extend((spike_peaks + s0).tolist())
-                    continue
-
             # Append new observations to Ψ_mem (FIFO auto-evicts)
             for p in spike_peaks:
                 psi_mem[j].append(z_win[:, int(p)].copy())
@@ -224,7 +217,7 @@ def run_yeung(
                 proj = float(v_per[j] @ Sigma_star_inv @ (noise_obs - mu_star))
                 c_lo[j] = forgetting * c_lo[j] + (1.0 - forgetting) * (proj ** 2)
 
-            # Record spikes (global coords)
+            # Record the same z-gated peaks as spikes (global coords)
             all_spikes[j].extend((spike_peaks + s0).tolist())
 
         # Commit EMA-updated global stats

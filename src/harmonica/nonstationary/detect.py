@@ -1,14 +1,11 @@
-"""Spike detection primitives for NN-refined sources.
-
-Three detectors with different trade-offs:
+"""Spike detection for refined sources.
 
 - :func:`template_spike_detect` — xcorr with an auto-built mean waveform.
-  Best for clean sources (wins on the ``clean90`` benchmark).
-- :func:`detect_spikes` — two-gate (KMeans on peaks ∩ absolute height).
-  Guardrail: prevents NN-amplified noise from landing in the spike cluster.
-- :func:`detect_best` — try-all-and-pick (both signs × k-means / xcorr /
-  two-gate) with the winner being the detector that produced the most
-  spikes. Polarity-agnostic fallback used by every pipeline wrapper.
+- :func:`detect_spikes` — two-gate (KMeans on peaks ∩ absolute height),
+  which keeps amplified noise peaks out of the spike cluster.
+- :func:`detect_best` — runs k-means, template and two-gate detection on
+  the positive peaks and keeps the detector that found the most spikes.
+  Used for every per-unit refiner and the nonlinear-ICA baselines.
 """
 from __future__ import annotations
 
@@ -99,9 +96,8 @@ def detect_spikes(
     Gate 1: ``est_spike_times`` (k-means on asymmetric power-law peaks).
     Gate 2: ``peak > min_height * source.std()``.
 
-    Intersection prevents NN refinement from promoting noise peaks into
-    the spike cluster (a failure mode visible in the iref-failure-diagnosis
-    work).
+    The intersection keeps refinement-amplified noise peaks out of the
+    spike cluster.
 
     Args:
         source: ``(T,)`` source signal.
@@ -133,13 +129,12 @@ def detect_best(
     use_gated: bool = True,
     min_height: float = 3.0,
 ) -> tuple[np.ndarray, float]:
-    """Try every (sign × detector) combination, return the largest spike set.
+    """Try every detector on the positive peaks, return the largest spike set.
 
-    NOTE: the sign sweep is **disabled by default**. ICA's refinement loop
-    commits to the positive-peak convention and sweeping over negative sign
-    was amplifying catastrophic failures.
+    Only positive peaks are considered: the ICA refinement loop fixes the
+    sign convention of each source.
 
-    Detectors tried (positive sign only):
+    Detectors tried:
 
     - :func:`est_spike_times` (k-means on asymmetric power-law peaks)
     - :func:`template_spike_detect` (xcorr template matching)

@@ -1,33 +1,18 @@
 # HarmonICA engine
 
-PyTorch implementation of the HarmonICA building blocks: gradient-based
-separation with a jointly trained, time-varying compensation network, spike
-timestamping, and peel-off through the learned inverse. Originally written by
-Alexander Kenneth Clarke as a stand-alone package.
+PyTorch building blocks of HarmonICA: a separation vector trained jointly with
+a time-varying, invertible compensator, spike timestamping, and peel-off
+through the learned inverse. Adapted from a stand-alone package by Alexander
+Kenneth Clarke; only the parts the paper's method uses are kept.
 
-The stand-alone pipeline (`DecompositionModule.run`) is:
-
-```
-raw signal (T, C)
-  → bandpass
-  → extend (factor=100)
-  → whiten (ZCA)
-  → projection-pursuit loop:
-        gradient ICA  +  jointly-trained NN compensation A(θ, t)
-        → timestamp via soft-k-means on peaks + silhouette
-        → accept / reject
-        → angle-dependent STA peel-off (via the compensation inverse)
-        → repeat
-  → list of timestamp tensors (one per MU)
-```
-
-**How the paper uses it.** `harmonica.baselines.run_signal_space` does not call
-`run`. It does its own preprocessing (extension, PCA, ZCA), warm-starts each
-unit's separation vector from a FastICA filter, disables the silhouette /
-patience gates, trains each unit for a fixed number of `joint_step` epochs
-(compensation switched on after `sep_only_warmup`), and calls `peel_off`
-between units. Configuration comes from `SurfaceConfig` plus any
-`config_overrides`.
+**How it is used.** `harmonica.baselines.run_signal_space` (HarmonICA) and the
+per-unit `harmonica.models.harmonica_signal_space.refine_signal_space_comp_warmstart`
+do their own preprocessing (Toeplitz extension, PCA, ZCA), build a `State` on
+the whitened signal, warm-start each unit's separation vector from a FastICA
+filter, train it for a fixed number of `joint_step` epochs (compensation
+switched on after `sep_only_warmup`), timestamp the compensated source, and
+(multi-unit only) call `peel_off` before the next unit. Configuration comes
+from `SurfaceConfig` plus any `config_overrides`.
 
 Data layout here is `(T, C)` (time-first), opposite to the `(C, T)` convention
 used everywhere else in `harmonica`; the callers transpose at the boundary.
@@ -36,94 +21,55 @@ used everywhere else in `harmonica`; the callers transpose at the boundary.
 
 | File | Contents |
 |---|---|
-| `__init__.py` | Package surface: `Config`, `IntramuscularConfig`, `SurfaceConfig`, `DecompositionModule` |
-| `configs.py` | Pydantic config base + two presets (intramuscular @ 10.24 kHz, surface @ 2.048 kHz) |
-| `decomposition.py` | Main `DecompositionModule` — joint `joint_step`, `run_decomposition`, `peel_off`, `run` (projection-pursuit loop) |
-| `state.py` | `State` container: preprocessed signal, auxiliary (context) signal, activity indices, separation/compensation weights, optimisers |
-| `nets.py` | Three compensation network architectures (see below) |
-| `preprocessing.py` | `high_pass_filter`, `low_pass_filter`, `extend` (Toeplitz), `whiten` (chol/zca/pca/zca_cor/pca_cor) |
-| `timestamping.py` | `peak_finder` (maxpool), `soft_k_means`, `signal_to_timestamps`, `timestamps_to_windows` (STA extractor), `find_quality_metric` (shift-tolerant accuracy/precision/recall), `silhouette_measure` |
-| `plotting.py` | `plot_sources` — live training plot (save_dir) |
-| `logger.py` | Run-directory / JSON log writer |
+| `__init__.py` | Package surface: `Config`, `SurfaceConfig`, `DecompositionModule` |
+| `configs.py` | Pydantic `Config` base and the `SurfaceConfig` preset (2.048 kHz surface EMG) |
+| `decomposition.py` | `DecompositionModule`: `calculate_source`, `calculate_timestamps`, `joint_step`, `peel_off` |
+| `state.py` | `State`: whitened signal, context signal, separation vector, compensator, optimisers |
+| `nets.py` | Compensator networks `ConditionalLowRank` (default) and `ConditionalAffine` |
+| `timestamping.py` | `peak_finder` (max-pool), `soft_k_means`, `signal_to_timestamps` (+ silhouette), `timestamps_to_windows` (STA windows) |
 
-## Non-stationary compensation
+## Compensation
 
-The compensation network predicts a time-varying invertible map `A(t) =
-f_NN(context(t))` applied to the whitened signal *before* the static separation
-vector `w` — so the effective filter is `w ∘ A(t)`. `context(t)` comes from the
-`auxiliary` argument, which is **either**:
+The compensator predicts a time-varying invertible map `A(t) = f_NN(context(t))`
+applied to the whitened signal *before* the static separation vector `w`, so
+the source is `wᵀ A(t) z(t)`. `context(t)` is the `auxiliary` argument of
+`State`: either an observed signal (the joint angle, "HarmonICA (θ)") or, by
+default, sinusoidal positional encodings of time at periods
+`(0.1, 0.2, 0.5, 1.0, 2.0)` s (`State.get_auxiliary`, "HarmonICA (PE)").
 
-- an **external observed signal** (e.g. joint angle), passed in via `run(..., auxiliary=…)`, **or**
-- auto-generated sinusoidal positional encodings at periods `(0.1, 0.2, 0.5, 1.0, 2.0)` seconds (`State.get_auxiliary`).
+Two architectures, selected by `Config.compensation_model`:
 
-This means it can run **blind** (sinusoidal context = a learned time-NN) or
-**semi-blind** (observed context = HarmonICA-style angle conditioning).
+1. **`ConditionalLowRank`** (`"lowrank"`, default) — `A(t) = I + U(t) Vᵀ` with a
+   learned shared `V ∈ ℝ^{C×r}` (`compensation_rank`, 3 by default) and
+   per-sample `U(t) ∈ ℝ^{C×r}` predicted by an MLP. The inverse uses the
+   Woodbury identity (closed-form solve for `r ≤ 3`).
+2. **`ConditionalAffine`** (`"affine"`) — per-channel
+   `x → x ⊙ exp(log_w(t)) + b(t)` from an MLP; invertible, but cannot mix
+   channels. Used by the supplementary ablation.
 
-### Three compensation architectures (`nets.py`)
+Both cache their per-sample parameters (`init_cache` / `update_cache`), so the
+compensated signal and its inverse can be evaluated on any slice of time.
 
-Switchable via `Config.compensation_model`:
+## Training step
 
-1. **`ConditionalAffine`** (`"affine"`) — per-sample `log_weight(t)` and
-   `bias(t)` from an MLP: `x → x * exp(log_w(t)) + b(t)`. Element-wise in
-   channel — *cannot rotate the filter* (only rescales/shifts).
+`joint_step` alternates two losses with two RMSprop optimisers:
 
-2. **`ConditionalGivensMatrix`** (`"givens"`) — `Affine` + a stack of learned
-   Givens rotations on random channel pairs, with angles predicted by a small
-   MLP. Invertible, cheap, **can rotate** in the selected 2-planes.
-
-3. **`ConditionalLowRank`** (`"lowrank"`, **DEFAULT**) — `A(t) = I + U(t) Vᵀ`
-   with a learned shared `V ∈ ℝ^{C×r}` (rank 3 default) and per-sample
-   `U(t) ∈ ℝ^{C×r}` predicted by an MLP. Inverse via **Woodbury identity**
-   (closed-form solve for r≤3). Full per-sample correction of rank `r` — the
-   most expressive of the three, and the default.
-
-All three support `init_cache` / `update_cache` so compensation params are
-computed once per update and indexed with a slice for peel-off.
-
-### Training — two losses, two optimizers, alternating
-
-`joint_step` in `decomposition.py`:
-
-- **Separation loss** (ICA): normalize source to z-score, clamp to `clamp_max=30`,
-  power-law non-Gaussianity `L_sep = -mean(sign(s) * |nonlin_scale * s|^exponent)`.
-  Updates only `separation_weights`. Gradient clipped at 10.
-- **Compensation loss** (spike/null contrast):
+- **Separation** (updates `w` only): z-score the *uncompensated* source,
+  clamp at `clamp_max`, and minimise
+  `L_sep = -mean(sign(s) · |nonlin_scale · s|^exponent)`. Gradient clipped at 10.
+- **Compensation** (updates `A` only, `w` detached), once compensation is on:
   ```
   L_comp = sqrt( spike_std² + max(null_std², uncompensated_null_var) )
   ```
-  where spike/null vectors are sampled via timestamps from the current source
-  (+ null = rejection sampling outside timestamps). **Spike dropout 0.5**,
-  **1000 null samples**. Only updates compensation weights. Gradient clipped at 0.1.
+  over spike samples (timestamps of the compensated source, 50 % dropped at
+  random) and `num_null_samples` null samples drawn away from the spikes.
+  Timestamps are re-estimated every `compensation_resample_every` steps.
+  Gradient clipped at 0.1.
 
-Separate RMSprop optimizers. Compensation is **delayed** by
-`compensation_delay=100` steps — the ICA filter settles first, then
-compensation joins. `max_decomp_steps=1000` per source, early stop on patience
-(100 steps no ISI improvement) or silhouette below 0.5.
+## Neural peel-off
 
-### Stability guards
-
-- **Baseline drift monitor**: measures variance of segment means. If the
-  compensated source drifts >3× reference drift (recorded at
-  `compensation_delay`), compensation is stopped → prevents collapse.
-- **Silhouette gate**: if `sil < 0.5` at `compensation_delay`, end early
-  (compensation won't rescue a hopeless source).
-- **Compensation cache resampling**: recompute spike/null peaks every N steps
-  (`compensation_resample_every=5`) — spikes/nulls are stale between resamples.
-
-### Projection pursuit + angle-dependent peel-off
-
-After each accepted source, `peel_off()` in `decomposition.py`:
-
-1. Compute the STA in **compensated space** (`windows.mean(0)`).
-2. For each spike time `s`, use
-   `compensation_weights.inverse(sta, auxiliary, use_cache=True, indices=slice(start, end))`
-   to **transform the STA back through the time-varying `A(t)⁻¹`** and subtract
-   it from the raw (whitened) signal.
-
-The STA is subtracted through the learned time-varying map, not as a fixed
-template.
-
-Acceptance criteria: `silhouette ≥ 0.9`, `≥10` spikes, and **not a repeat** —
-repeats detected via `find_quality_metric` with shift tolerance
-(`accuracy_max_shift_ms=10`); if `>90% accuracy` overlap with a prior source,
-peel-off is triggered anyway to reduce the signal.
+`peel_off(timestamps)` computes the spike-triggered average in the compensated
+frame and, at each spike, maps it back through `A(t)⁻¹` (cached parameters,
+sliced to the spike's window) before subtracting it from `State.signal`. The
+template is thus removed through the learned time-varying map, not as a fixed
+waveform.

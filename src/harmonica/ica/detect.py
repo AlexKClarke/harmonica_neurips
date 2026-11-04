@@ -1,6 +1,6 @@
 """Spike detection from a 1-D source signal.
 
-The canonical detector is :func:`est_spike_times` — peak-find followed by
+The detector is :func:`est_spike_times` — peak-find followed by
 2-means clustering on peak amplitudes. It returns both the spike indices
 and a silhouette-like (SIL) score used throughout the pipeline to gate
 source acceptance (default ``sil_th = 0.8``).
@@ -46,13 +46,7 @@ def est_spike_times(
         ``(spike_indices, sil)``. Empty array and ``0.0`` if no peaks.
     """
     sig = np.asarray(sig)
-    # Was ``np.sign(sig) * sig ** a``, which equals the documented
-    # ``sign(s) * |s|^a`` only for EVEN ``a``. For odd ``a`` the two sign
-    # factors cancel to ``|s|^a`` — full-wave rectification, so every negative
-    # trough became a positive peak and ``find_peaks`` fired on it. For
-    # fractional ``a`` a negative base gives NaN, wiping out half the signal.
-    # Every caller uses the default ``a=2`` (even), so no existing result
-    # changes; the bug only surfaced when sweeping the exponent.
+    # sign(s) * |s|^a keeps troughs negative for every exponent a.
     sig = np.sign(sig) * np.abs(sig) ** a
 
     if cluster != "kmeans":

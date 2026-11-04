@@ -23,6 +23,8 @@ SOFTWARE.
 --------------------------------------------------------------------------------
 Third-party code
 
-src/harmonica/baselines/vendored_adapt_decomp/ is a vendored copy of
-imendezguerra/adapt_decomp (MIT License, Copyright (c) 2025 Irene Mendez Guerra).
-Its license is reproduced in that directory as LICENSE_adapt_decomp.
+src/harmonica/baselines/vendored_adapt_decomp/ (commit 8ffeb66) and
+src/harmonica/baselines/vendored_adapt_decomp_v1/ (release v1.0.0, commit a8f5373)
+are vendored copies of imendezguerra/adapt_decomp (MIT License, Copyright (c)
+2025 Irene Mendez Guerra). Its license is reproduced in those directories as
+LICENSE_adapt_decomp and LICENSE.

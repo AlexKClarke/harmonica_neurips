@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-# Supp. Table 17: stationarity-loss family, filter-space refiner (refine_harmonica_style).
+# Supp. Table 17 (tab:supp:loss): stationarity-loss family on the filter-space
+# refiner (refine_harmonica_style): mean F1 over every unit and n at
+# F1 >= 0.85 / 0.90 / 0.95 (the "total" column), per seed.
 # Usage: DATA=/path/to/benchmark_v2 bash experiments/table17_loss_family.sh [ch070] [ch320]
 set -euo pipefail
 source "$(dirname "$0")/_common.sh"
@@ -11,6 +13,6 @@ for grid in ${@:-ch070 ch320}; do
         done
     done
     for loss in $LOSSES; do
-        table "$grid" "loss_$loss" "$loss" --top-k 1000
+        table "$grid" "loss_$loss" "$loss" --mean-f1 --also-at 0.85,0.90
     done
 done

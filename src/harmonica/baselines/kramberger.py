@@ -27,7 +27,6 @@ import numpy as np
 from sklearn.decomposition import PCA
 
 from ..ica.algorithm import peel_off as _peel_off_fn
-from ..ica.algorithm import run_ica_loop
 from ..ica.detect import est_spike_times
 from ..ica.utils import extension
 from ..ica.whitening import whitening as _whiten
@@ -184,7 +183,6 @@ def _kramberger_track(
     q: float = 1e-3,
     r_meas: float = 1e-1,
     ckc_refine: int = 3,
-    gate_sil: float | None = None,
 ) -> tuple[dict[int, np.ndarray], dict[int, list]]:
     """Windowed forward tracker — filter state = CKC STA.
 
@@ -239,25 +237,6 @@ def _kramberger_track(
         win_T = s1 - s0
 
         for j in range(n_src):
-            # Opt-in, off by default (gated tracking): if this filter's current output is already a
-            # clean spike train, freeze it — report spikes and skip the Kalman/STA
-            # update. Without this, the tracker refines every filter on the full signal
-            # with no inter-filter orthogonality, so filters CAPTURE / collapse onto the
-            # dominant MUs (stationary: 32 distinct MUs -> 13). Gating recovers ~calib
-            # quality on stationary while still tracking genuine drift.
-            if gate_sil is not None:
-                s_cur = W[j] @ z_win
-                top_g = np.argsort(np.abs(s_cur))[-max(5, win_T // 200):]
-                if np.mean(s_cur[top_g]) < 0:
-                    s_cur = -s_cur
-                    W[j] = -W[j]
-                sp_g, sil_g = est_spike_times(s_cur, fs)
-                sp_g = sp_g[(sp_g >= 0) & (sp_g < win_T)]
-                if sil_g >= gate_sil and len(sp_g) >= 3:
-                    all_spikes[j].extend((sp_g + s0).tolist())
-                    filter_timeline[j].append((s0, s1, W[j].copy()))
-                    continue
-
             # Predict
             if wi == 0:
                 w_pred = W[j].copy()
@@ -387,10 +366,6 @@ def run_kramberger(
     q: float = 1e-3,
     r_meas: float = 1e-1,
     ckc_refine: int = 3,
-    calibrator: str = "activity",
-    gated_tracking: bool = False,
-    gate_sil: float = 0.85,
-    track: bool = True,
     verbose: bool = False,
 ) -> dict[int, np.ndarray]:
     """Kramberger-style decomposition: stationary-window CKC + Kalman tracking.
@@ -419,6 +394,11 @@ def run_kramberger(
         calib_sil_th: Per-source SIL acceptance threshold at calibration.
         calib_cov_th: Per-source ISI-CV upper bound at calibration.
         calib_min_spikes: Minimum spike count to accept a calibration MU.
+        calib_window_mode: ``'angle'`` calibrates on the most stationary
+            angle window; ``'time'`` on the window starting at
+            ``calib_start_s``.
+        calib_start_s: Start of the calibration window for ``'time'``, in
+            seconds.
         track_win_s: Tracking window length, in seconds.
         track_overlap: Fractional overlap between tracking windows.
         q: Process-noise variance of the Kalman filter (per filter coord).
@@ -470,53 +450,16 @@ def run_kramberger(
 
     # Calibration in that window.
     z_calib = z_w[:, s0:s1]
-    if calibrator == "ica":
-        # Opt-in (calibrator='ica'): the activity-index seed in ``_ckc_on_window`` cannot bootstrap on
-        # some data (a single high-energy sample yields a 1-spike source that STA
-        # refinement can't grow), returning 0 sources regardless of window size or
-        # thresholds. fastICA is a robust drop-in seeder.
-        _, sp_calib, _sils_ica, filters = run_ica_loop(
-            z_calib, FS, sil_th=calib_sil_th, n_iter=max(calib_n_iter, 60),
-            seed=1909, refinement_loop=True, peel_off=True,
-        )
-        sils = np.asarray(_sils_ica, dtype=float)
-    elif calibrator == "activity":
-        filters, sp_calib, sils = _ckc_on_window(
-            z_calib, fs=FS,
-            n_iter=calib_n_iter, sil_th=calib_sil_th, cov_th=calib_cov_th,
-            min_spikes=calib_min_spikes,
-        )
-    else:
-        raise ValueError(f"calibrator must be 'activity' or 'ica', got {calibrator!r}")
+    filters, sp_calib, sils = _ckc_on_window(
+        z_calib, fs=FS,
+        n_iter=calib_n_iter, sil_th=calib_sil_th, cov_th=calib_cov_th,
+        min_spikes=calib_min_spikes,
+    )
     n_src = filters.shape[1]
     if verbose:
         print(f"  [kramberger] calibration: {n_src} MUs discovered")
     if n_src == 0:
         return {}
-
-    # Opt-in (track=False): calibration-only mode (no Kalman tracking). Correct for isometric /
-    # quasi-stationary data, where there is no filter drift to track and the tracker
-    # only harms -- its per-window quality gate does not fire on sparse firing, so
-    # filters get updated and capture/collapse. On a 44s isometric MUniverse recording
-    # (16% MVC) calibration-only recovers ~6 clean MUs (near the ICA ceiling of 8),
-    # whereas tracking drops it to ~1.
-    if not track:
-        min_gap = int(0.01 * FS)
-        result: dict[int, np.ndarray] = {}
-        for j in range(n_src):
-            s = filters[:, j] @ z_w
-            top = np.argsort(np.abs(s))[-max(5, T // 200):]
-            if np.mean(s[top]) < 0:
-                s = -s
-            sp = np.unique(est_spike_times(s, FS)[0])
-            if len(sp) < 5:
-                continue
-            keep = [int(sp[0])]
-            for x in sp[1:]:
-                if x - keep[-1] >= min_gap:
-                    keep.append(int(x))
-            result[j] = np.asarray(keep, dtype=int)
-        return result
 
     # Shift calibration spikes into global coords so the tracker can
     # use them for the first-window sign check.
@@ -527,6 +470,5 @@ def run_kramberger(
         z_w, filters, sp_calib_global,
         fs=FS, win_s=track_win_s, overlap=track_overlap,
         q=q, r_meas=r_meas, ckc_refine=ckc_refine,
-        gate_sil=gate_sil if gated_tracking else None,
     )
     return result
