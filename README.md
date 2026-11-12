@@ -3,6 +3,8 @@
 Code for **HarmonICA: Quasi-Time-Invariant ICA for Motor Unit Decomposition
 during Dynamic Contractions** (NeurIPS 2026).
 
+Paper: [arXiv:2406.19581](https://arxiv.org/abs/2406.19581)
+
 HarmonICA decomposes high-density surface EMG recorded during movement into
 motor-unit spike trains. A static ICA vector separates each motor unit after
 a learned, low-rank, time-varying transform of the signal
@@ -15,7 +17,7 @@ one is trained (neural peel-off).
 ## Install
 
 ```bash
-git clone <this repository> harmonica && cd harmonica
+git clone https://github.com/AlexKClarke/harmonica_neurips.git harmonica && cd harmonica
 pip install -e .            # Python >= 3.10 and PyTorch; a CUDA GPU is recommended
 pip install -e .[dev]       # adds pytest
 pip install -e .[adapt]     # adds the dependencies of the Adapt (Mendez Guerra 2024) v1.0.0 engine
@@ -128,7 +130,9 @@ environment's `lib/` on `LD_LIBRARY_PATH`.
                Mendez Guerra, Irene and Ezaz-Nikpay, Noura and Mamidanna, Pranav and
                Ma, Shihan and Muceli, Silvia and Farina, Dario},
   booktitle = {Advances in Neural Information Processing Systems},
-  year      = {2026}
+  year      = {2026},
+  eprint    = {2406.19581},
+  archivePrefix = {arXiv}
 }
 ```
 
