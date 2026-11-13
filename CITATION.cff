@@ -1,0 +1,56 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite the paper below."
+title: "harmonica-emg"
+version: 1.0.0
+license: MIT
+repository-code: "https://github.com/AlexKClarke/harmonica_neurips"
+authors:
+  - family-names: Clarke
+    given-names: Alexander Kenneth
+  - family-names: Halatsis
+    given-names: Dimitrios
+  - family-names: Grison
+    given-names: Agnese
+  - family-names: Mendez Guerra
+    given-names: Irene
+  - family-names: Ezaz-Nikpay
+    given-names: Noura
+  - family-names: Mamidanna
+    given-names: Pranav
+  - family-names: Ma
+    given-names: Shihan
+  - family-names: Muceli
+    given-names: Silvia
+  - family-names: Farina
+    given-names: Dario
+preferred-citation:
+  type: conference-paper
+  title: "HarmonICA: Quasi-Time-Invariant ICA for Motor Unit Decomposition during Dynamic Contractions"
+  collection-title: "Advances in Neural Information Processing Systems"
+  conference:
+    name: "Neural Information Processing Systems (NeurIPS)"
+  year: 2026
+  url: "https://arxiv.org/abs/2406.19581"
+  identifiers:
+    - type: other
+      value: "arXiv:2406.19581"
+      description: arXiv preprint
+  authors:
+    - family-names: Clarke
+      given-names: Alexander Kenneth
+    - family-names: Halatsis
+      given-names: Dimitrios
+    - family-names: Grison
+      given-names: Agnese
+    - family-names: Mendez Guerra
+      given-names: Irene
+    - family-names: Ezaz-Nikpay
+      given-names: Noura
+    - family-names: Mamidanna
+      given-names: Pranav
+    - family-names: Ma
+      given-names: Shihan
+    - family-names: Muceli
+      given-names: Silvia
+    - family-names: Farina
+      given-names: Dario
